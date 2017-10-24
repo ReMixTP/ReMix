@@ -1,0 +1,7 @@
+# Routes
+
+GET     /                       core.controllers.PluginsController.list
+POST    /register               core.controllers.PluginsController.register
+GET     /:plugin                core.controllers.PluginsController.aboutAll(plugin: String)
+DELETE  /:plugin                core.controllers.PluginsController.remove(plugin: String)
+GET     /:plugin/:feature       core.controllers.PluginsController.about(plugin: String, feature: String)
