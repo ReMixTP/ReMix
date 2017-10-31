@@ -51,8 +51,8 @@ class PluginsController @Inject()(cc: ControllerComponents)
           Ok(plugin.toJson())
         }
       } else {
-        try {
-          Plugins.get(pluginID).map { (plugin) =>
+        Plugins.get(pluginID).map { (plugin) =>
+          try {
             val featVal = feature match {
               case "plugin"      => Json.toJson(plugin.id)
               case "name"        => Json.toJson(plugin.name)
@@ -67,11 +67,11 @@ class PluginsController @Inject()(cc: ControllerComponents)
               "plugin" -> pluginID,
               feature -> featVal
             ))
+          } catch {
+            case e: MatchError => BadRequest(Json.obj(
+              "result" -> "failure",
+              "reason" -> ("Unknown plug-in attribute '" + feature + "'")))
           }
-        } catch {
-          case e: MatchError => Future { BadRequest(Json.obj(
-            "result" -> "failure",
-            "reason" -> ("Unknown plug-in attribute '" + feature + "'"))) }
         }
       }
     }

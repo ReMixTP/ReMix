@@ -45,6 +45,8 @@ object PluginClient
       .get()
     return response.map {
       r => {r.json}
+    } .recover {
+      case t: java.net.ConnectException => JsArray()
     }
   }
 }
