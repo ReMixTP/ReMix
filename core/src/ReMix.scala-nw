@@ -1,0 +1,2139 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage{noweb}
+\usepackage[T1]{fontenc}
+\usepackage{fontspec}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{amssymb}
+\usepackage{stmaryrd}
+\usepackage{tikz}
+\usepackage{siunitx}
+\usepackage{lineno,hyperref}
+\usepackage[inline]{enumitem}
+\usepackage{xifthen}
+\modulolinenumbers[5]
+
+\setmonofont{Menlo}[Scale=0.75]
+
+\bibliographystyle{acm}
+
+\newenvironment{keyword}{%
+  \vspace{1em}
+  \fontsize{8pt}{7pt}\selectfont
+  \newcommand{\sep}{, }%
+  \noindent\textbf{Keywords:}\,
+}{}
+
+\newcommand{\ReMix}{{\sc ReMix}}
+\newcommand{\powerset}[1]{\mathcal{P}\left(#1\right)}
+\newcommand{\statements}[1]{\mathcal{S}\left(#1\right)}
+\newcommand{\goals}[1][]{\mathcal{G}\ifthenelse{\isempty{#1}}{}{\left\lbrack#1\right\rbrack}}
+\newcommand{\defntn}[1]{\mathcal{D}\left(#1\right)}
+\newcommand{\lang}{\mathcal{L}}
+
+\newcommand{\hypoth}[1]{\llbracket #1 \rrbracket}
+\newcommand{\stmt}[1]{\text\guillemotleft #1 \text\guillemotright}
+
+\newenvironment{aside}{%
+  \newsavebox{\mybox}
+  \begin{lrbox}{\mybox}%
+}{%
+  \end{lrbox}
+  \begin{center}
+    \fbox{\parbox{0.8\textwidth}{\paragraph*{Aside} \usebox{\mybox}}}
+  \end{center}
+}
+
+\begin{document}
+\title{\ReMix}
+\author{Aaron Stockdill\\Department of Computer Science and Technology\\University of Cambridge\\United Kingdom\\\texttt{aaron.stockdill@cl.cam.ac.uk}}
+\maketitle
+
+\begin{abstract}
+  Heterogeneous reasoning is the next step in assisted and automated theorem proving.
+  By working alongside the user,
+  explaining the steps more clearly
+  and allowing the user to specify steps in any number of ways,
+  workflows can become more organic and natural.
+  \ReMix{} is an online platform for heterogeneous reasoning,
+  allowing specialised systems to work together with minimal new code.
+  This paper outlines the architecture and details of \ReMix{},
+  including the core and its internal models,
+  and the interfaces to the plug-ins so that communication is simple and distributed.
+\end{abstract}
+
+\begin{keyword}
+  Heterogeneous reasoning\sep automated theorem proving\sep representations\sep interactive theorem proving\sep diagrammatic reasoning
+\end{keyword}
+
+\section{Introduction}
+\ReMix{} is a heterogeneous reasoning web app
+designed to leverage the power of existing tools that cannot typically work together.
+Inspired by the work of MixR,
+we allow placeholders for representational embedding.
+For example, we may have an Euler diagram embedded within a larger set-theoretic sentence.
+The benefits of this approach will not be outlined here:
+instead, this document details the development of \ReMix{}
+at a concept and code level.
+
+\ReMix{} consists of three key components:
+\begin{itemize}
+\item a \emph{core}, which controls everything happening in the system;
+\item a web-based user interface, which is the user-focused access point to the core; and
+\item a set of plug-ins which connect to the core---these are where the actual reasoning occurs.
+\end{itemize}
+This document considers the core, the interface from the UI to the core, and the core-side interactions with the plug-ins.
+Plug-ins are specified in their own documents,
+and can of course be developed externally to this project by others.
+The UI itself is not as thoroughly documented anywhere,
+but nor does it need to be,
+serving only as a window to the core.
+
+\section{The core}
+\subsection{Proofs, goals, and formulae}
+\ReMix{} is all about proof: finding and verifying proofs that are heterogeneous in nature.
+To that end, one of the fundamental parts of \ReMix{} is the [[Proof]] class.
+A proof is a sequence of [[ProofStep]]s, each containing [[Goal]]s to be eliminated.
+Abstractly, a [[Proof]] is a linked list, each node being a [[ProofStep]],
+embellished with useful methods specific to proof extension.
+<<models/Proof.scala>>=
+package remix.models
+
+<<Model imports>>
+
+class Proof(val name: String, startingGoals: Seq[Goal])
+{
+  var head: Option[ProofStep] = Some(ProofStep(startingGoals, None, None, None))
+  var tail: Option[ProofStep] = head;
+
+  def this(name: String) {
+    this(name, Nil)
+    head = None
+    tail = None
+  }
+
+  <<Extend the proof by a single step>>
+  <<Remove a step of the proof>>
+  <<Find the rules which could be applied>>
+}
+
+case class ProofStep(
+  val goals: Seq[Goal],
+  var next: Option[ProofStep],
+  var reason: Option[RuleApplication],
+  var prev: Option[ProofStep]
+)
+@
+<<Makefile build entry>>=
+notangle -Rmodels/Proof.scala $< > main/scala/models/Proof.scala
+@
+@ Why a linked list and not a tree?
+Because a linked list is simpler but still sufficient.
+A tree comes about because each goal would be proved by a subtree,
+whereas by taking the goal-elimination approach,
+we can work on different ``branches'' simultaneously in one path.
+This also reflects the philosophy of \ReMix{}:
+\ReMix{} should not have to know about the subtrees,
+as they should be fully understood by the theorem provers being plugged in
+and generated appropriately.
+
+A proof needs to be saved out to file storage in some way,
+so it needs to be serializable to JSON
+(and of course the reverse as well).
+<<models/Proof.scala>>=
+object Proof
+{
+  implicit val ProofFormat: Format[Proof] = new Format[Proof] {
+    def reads(json: JsValue): JsResult[Proof] = {
+      val proofName = json("name").as[String]
+      val proofHead = json("steps").as[Option[ProofStep]]
+      val proof = new Proof(proofName)
+      proof.head = proofHead
+      var ptr: Option[ProofStep] = proof.head
+      var prev: Option[ProofStep] = None
+      while (ptr != None) {
+        ptr match {
+          case Some(p) => p.prev = prev
+          case None => None
+        }
+        prev = ptr
+        ptr = ptr match {
+          case Some(ptr) => ptr.next
+          case None => throw new Exception // This should never happen.
+        }
+      }
+      proof.tail = prev
+      return JsSuccess(proof)
+    }
+
+    def writes(proof: Proof): JsValue = {
+      return Json.obj(
+        "name" -> proof.name,
+        "steps" -> Json.toJson(proof.head)
+      )
+    }
+  }
+}
+@
+@ And similarly for the [[ProofStep]]s,
+on which a [[Proof]] relies.
+<<models/Proof.scala>>=
+object ProofStep
+{
+  implicit val ProofStepFormat: Format[ProofStep] = new Format[ProofStep] {
+    def reads(json: JsValue): JsResult[ProofStep] = {
+      return JsSuccess(new ProofStep(
+        json("goals").as[Seq[Goal]],
+        json("next").as[Option[ProofStep]],
+        json("reason").as[Option[RuleApplication]],
+        None
+      ))
+    }
+
+    def writes(proofStep: ProofStep): JsValue = {
+      return Json.obj(
+        "goals" -> Json.toJson(proofStep.goals),
+        "next" -> Json.toJson(proofStep.next),
+        "reason" -> Json.toJson(proofStep.reason)
+      )
+    }
+  }
+}
+@
+
+Because a proof is a linked list,
+we can give it methods similar to those we would expect to see in a linked list.
+We can append a new element on the end simply enough.
+Note that we do need to be given a reference to the plug-ins,
+so that the rule application can query them.
+<<Extend the proof by a single step>>=
+def extend(ruleApp: RuleApplication, plugins: Plugins) {
+  val newGoals = Await.result(ruleApp.apply(plugins: Plugins), 10.seconds)
+  // MUST do work before continuing
+  // Note that the above may have thrown a PluginError.
+  // TODO: Handle it?
+  val nextStep = new ProofStep(newGoals, None, None, tail)
+  tail = tail match {
+    case Some(tail) => {
+      tail.next = Some(nextStep)
+      tail.reason = Some(ruleApp)
+      tail.next
+    }
+    case None => None // If the tail was None, the head was none, how did we get here?
+  }
+}
+@
+
+Another common operation is to remove an element from the linked list.
+The easiest (special case) element to remove is the tail,
+so we give that a magic value of [[-1]].
+Otherwise there is more work involved.
+<<Remove a step of the proof>>=
+def pop(index: Int = -1) {
+  if (index == -1) {
+    <<Remove the tail>>
+  } else {
+    <<Remove the node at the given index>>
+
+  }
+}
+@
+@ The tail is simple to remove, mostly just some pointer updates.
+<<Remove the tail>>=
+if (tail == head) {
+  tail = None
+  head = None
+} else {
+  tail = tail match {
+    case Some(t) => {
+      println("Removing tail which is distinct.")
+      val new_t = t.prev
+      t.prev = None
+      t.next = None
+      // Make sure to break next on new_t
+      new_t.get.next = None // Safe, as Head and tail were distinct
+      new_t
+    }
+    case None => None
+  }
+}
+@
+
+Removing arbitrary elements from a linked list is non-trivial.
+Because we are using a doubly-linked list,
+our job is made simpler by not needing to explicitly hold back references when traversing.
+Still, it is best done recursively.
+<<Recursively find the element to remove>>=
+def stepOfInterest(step: ProofStep, index: Int): Option[ProofStep] = {
+  if (index < 0) return None
+  else if (index == 0) return Some(step)
+  else {
+    step.next match {
+      case Some(step) => return stepOfInterest(step, index-1)
+      case None => return None
+    }
+  }
+}
+@
+@ No part of this is difficult,
+it is simply the need for [[Option]] handling that adds noise.
+
+This leaves us free to define a the removal code as a simple set of pointer updates.
+<<Remove the node at the given index>>=
+<<Recursively find the element to remove>>
+head match {
+  case Some(head) => stepOfInterest(head, index) match {
+    case Some(step) => {
+      step.prev.get.next = step.next
+      step.next.get.prev = step.prev
+      step.next = None
+      step.prev = None
+    }
+    case None => None
+  }
+  case None => None
+}
+@
+
+
+The [[Goal]]s that make up [[ProofStep]]s are themselves a very simple construct.
+It consists of a set of [[Formula]]e,
+and a set of variables as strings,
+and placeholders.
+Variables represent the variables shared over all formulae,
+i.e. the universally quantified variables of the goal.
+<<models/Goal.scala>>=
+package remix.models
+
+<<Model imports>>
+
+class Goal(
+  val formulae: Set[Formula],
+  val variables: Set[Variable])
+{
+  <<Get the components by label>>
+}
+@
+<<Makefile build entry>>=
+notangle -Rmodels/Goal.scala $< > main/scala/models/Goal.scala
+@
+
+To make working with goals easier,
+we provide a way to index into them by formula label.
+<<Get the components by label>>=
+def apply(label: Label): Option[Formula] = {
+  for (formula <- formulae) {
+    if (label == formula.label) return Some(formula)
+  }
+  return None
+}
+@
+
+Because a Goal will need to be converted to and from JSON, we provided the necessary serializers and deserializers as well.
+<<models/Goal.scala>>=
+object Goal
+{
+  implicit val GoalFormat: Format[Goal] = new Format[Goal] {
+    def reads(json: JsValue): JsResult[Goal] = {
+      return JsSuccess(new Goal(
+        json("formulae").as[Set[Formula]],
+        json("variables").as[Set[Variable]]
+      ))
+    }
+
+    def writes(goal: Goal): JsValue = {
+      return Json.obj(
+        "formulae" -> Json.toJson(goal.formulae),
+        "variables" -> Json.toJson(goal.variables)
+      )
+    }
+  }
+}
+@
+
+At this point it is important to make clear that a [[Goal]] is not some kind of Horn Clause.
+There is no assumed relationship between the formulae except what occurs through their embeddings.
+The top-level clause is simply the formula with no references to its label,
+as embeddings of placeholders must for a tree;
+the node in the tree with no parent is the root.
+
+A [[Formula]] is a statement in a language understood by at least one plug-in.
+\ReMix{} makes no effort to understand the content of the formulae,
+instead considering them as black boxes for the plug-ins to reason with.
+Instead, \ReMix{} works with formula metadata,
+including language, variables, and placeholders.
+At the formula level, a placeholder is just a string, the label used to identify a foreign formula.
+Note that for this reason, a formula also has a label so it too can be embedded as a placeholder.
+<<models/Formula.scala>>=
+package remix.models
+
+<<Model imports>>
+
+class Formula(
+  val label: Label,
+  val data: JsValue,
+  val language: LanguageID,
+  val variables: Set[Variable],
+  val placeholders: Set[Label]
+)
+{
+
+}
+@
+<<Makefile build entry>>=
+notangle -Rmodels/Formula.scala $< > main/scala/models/Formula.scala
+@
+@ The [[language]] is frequently used to constrain the plug-ins that can work with a given formula,
+while the variables are bubbled up to the [[Goal]]
+so that all the formulae can agree on the content of their statements.
+Placeholder strings are a subset of the [[Goal]]'s placeholder keys,
+otherwise there is a definition not specified.
+
+
+[[Formula]]e will be converted to and from JSON frequently,
+so like [[Goal]]s we provide converters.
+Because a Goal will need to be converted to and from JSON, we provided the necessary serializers and deserializers as well.
+<<models/Formula.scala>>=
+object Formula
+{
+  implicit val FormulaFormat: Format[Formula] = new Format[Formula] {
+    def reads(json: JsValue): JsResult[Formula] = {
+      return JsSuccess(new Formula(
+        json("label").as[Label],
+        json("data"),
+        json("language").as[LanguageID],
+        json("variables").as[Set[Variable]],
+        json("placeholders").as[Set[Label]]
+      ))
+    }
+
+    def writes(formula: Formula): JsValue = {
+      return Json.obj(
+        "label" -> formula.label,
+        "data" -> formula.data,
+        "language" -> Json.toJson(formula.language),
+        "variables" -> Json.toJson(formula.variables),
+        "placeholders" -> Json.toJson(formula.placeholders)
+      )
+    }
+  }
+}
+@
+
+
+
+\subsection{\ReMix{} rules}
+
+To link together [[ProofStep]]s,
+we use [[RuleApplication]]s.
+A [[RuleApplication]] is a class which contains a [[Rule]],
+and specific instructions about how to apply it to the [[ProofStep]].
+A [[Rule]] is abstract, taking on several forms which we will discuss in more detail shortly.
+<<Rule trait>>=
+trait Rule
+{
+  val name: String
+  val provider: PluginID
+  def apply(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins): Future[Seq[Goal]]
+  def render(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins)
+  def dialog(goal: Goal, components: Set[Label], plugins: Plugins): Future[JsValue]
+}
+@
+@ A [[Rule]] can be applied, or it can be rendered.
+Application is self-explanatory: it takes a goal and produces some transformed goals.
+It may also take some extra information, often the result of a dialog box getting more information from a user.
+Rendering is often unnecessary, but it is useful for the tools to sometimes ``explain their working''.
+This provides them the opportunity to do so.
+Finally, there is a dialog method,
+which enables direct interaction between the plug-in and the user.
+
+To serialize and deserialize a [[Rule]] takes some work
+because it is a trait, not a class.
+That is, Scala is unable to convert a JSON object into the correct rule type automatically,
+or vice versa.
+So all rules come with a tag to specify which rule they are:
+one of
+[[translate]], [[reason]], [[extract]], and [[substitute]],
+each corresponding to the four rules below.
+We have to explicitly pass the rule formatter, to avoid recursive calls.
+<<Rule trait>>=
+object Rule
+{
+  implicit val RuleFormat: Format[Rule] = new Format[Rule] {
+    def reads(json: JsValue): JsResult[Rule] = {
+      return JsSuccess(json("rule-tag").as[String] match {
+        case "translation" => json.as[TranslationRule]
+        case "reasoning" => json.as[ReasoningRule]
+      })
+    }
+
+    def writes(rule: Rule): JsValue = {
+      return rule match {
+        case r: TranslationRule => (Json.toJson(r)(TranslationRule.TranslationRuleFormat).as[JsObject]
+                                    + ("rule-tag" -> JsString("translation")))
+        case r: ReasoningRule => (Json.toJson(r)(ReasoningRule.ReasoningRuleFormat).as[JsObject]
+                                  + ("rule-tag" -> JsString("reasoning")))
+      }
+    }
+  }
+}
+@
+
+The [[RuleApplication]] is a wrapper serving as a record of an applied [[Rule]].
+<<RuleApplication class>>=
+class RuleApplication(
+  val rule: Rule,
+  val goal: Goal,
+  val components: Set[Label],
+  val automated: Boolean,
+  val extraInfo: Option[JsValue]
+)
+{
+  def apply(plugins: Plugins): Future[Seq[Goal]] = {
+    return rule.apply(goal, components, extraInfo, plugins)
+  }
+
+  def render(plugins: Plugins) {
+    rule.render(goal, components, extraInfo, plugins)
+  }
+
+  def dialog(plugins: Plugins): Future[JsValue] = {
+    return rule.dialog(goal, components, plugins)
+  }
+}
+@
+@ The methods themselves are just utility wrappers around the [[Rule]].
+
+As with most other model classes, it is worth defining a JSON formatter.
+<<RuleApplication class>>=
+object RuleApplication
+{
+  implicit val RuleApplicationFormat: Format[RuleApplication] =
+  new Format[RuleApplication] {
+    def reads(json: JsValue): JsResult[RuleApplication] = {
+      return JsSuccess(new RuleApplication(
+        json("rule").as[Rule],
+        json("goal").as[Goal],
+        json("components").as[Set[Label]],
+        json("automated").as[Boolean],
+        if (json("extraInfo") == JsNull) None else Some(json("extraInfo"))
+      ))
+    }
+
+    def writes(ruleApp: RuleApplication): JsValue = {
+      return Json.obj(
+        "rule" -> Json.toJson(ruleApp.rule),
+        "goal" -> Json.toJson(ruleApp.goal),
+        "components" -> Json.toJson(ruleApp.components),
+        "automated" -> Json.toJson(ruleApp.automated),
+        "extraInfo" -> Json.toJson(ruleApp.extraInfo match {
+          case Some(info) => info
+          case None => JsNull
+        })
+      )
+    }
+  }
+}
+@
+
+We place the [[Rule]] trait and [[RuleApplication]] classes together in one file,
+along with the definitions of rules implementing the [[Rule]] trait.
+<<models/Rule.scala>>=
+package remix.models
+
+<<Model imports>>
+
+<<Rule trait>>
+<<Concrete rules>>
+<<RuleApplication class>>
+@
+<<Makefile build entry>>=
+notangle -Rmodels/Rule.scala $< > main/scala/models/Rule.scala
+@
+
+Despite the apparent complexity, \ReMix{} relies on exactly four rules:
+translation, reasoning, extraction, and substitution.
+<<Concrete rules>>=
+<<Translation rule>>
+<<Reasoning rule>>
+<<Extraction rule>>
+<<Substitution rule>>
+@
+@ Each of these is covered in more detail below.
+
+\subsubsection{Translation}
+A translation rule enables users to work with multiple languages in the same document.
+At any point, they are able to switch from one representation to another,
+depending on which suits the problem.
+This class of rule is quite simple,
+providing a single formula to the plug-in for translation.
+<<Translation rule>>=
+class TranslationRule(
+  val fromLanguage: LanguageID,
+  val toLanguage: LanguageID,
+  val provider: PluginID
+) extends Rule
+{
+  val name = s"Translation from ${fromLanguage} to ${toLanguage}"
+
+  <<Apply translation>>
+  <<Render translation>>
+  <<Describe a dialog to get a manual translation>>
+}
+<<Serialize a translation rule>>
+@
+
+Actually applying the translation is simple enough.
+The number of components should be one,
+else there are too many translations going on.
+Other than that,
+just extract the formula,
+get the translation from the plug-in,
+and create a new goal with the correct substitution.
+<<Apply translation>>=
+def apply(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins):
+Future[Seq[Goal]] = {
+  if (components.size != 1)
+    return Future{Array(goal)}
+  else {
+    val formulaOpt = goal(components.head)
+    if (formulaOpt == None) {
+      return Future{Array(goal)}
+    }
+    val formula = formulaOpt.get
+    val newFormulaFuture = plugins(provider).flatMap { _.query(
+      "translate",
+      s"translate?from=$fromLanguage&to=$toLanguage",
+      Json.obj(
+        "formula" -> Json.toJson(formula),
+        "extraInfo" -> (extraInfo match {
+          case Some(info) => info
+          case None => JsNull
+        })
+      )
+    )}.map { json => json.as[Formula] }
+    return newFormulaFuture.map { formula => {
+      val newFormulae = goal.formulae.map { oldFormula =>
+        if (oldFormula.label == formula.label) formula
+        else oldFormula
+      }
+      List(new Goal(newFormulae, goal.variables))
+    }}
+  }
+}
+@
+<<Render translation>>=
+def render(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins) {
+
+}
+@
+<<Describe a dialog to get a manual translation>>=
+def dialog(goal: Goal, components: Set[Label], plugins: Plugins): Future[JsValue] = {
+  return Future{JsNull}
+}
+@
+<<Serialize a translation rule>>=
+object TranslationRule
+{
+  implicit val TranslationRuleFormat: Format[TranslationRule] = new Format[TranslationRule] {
+    def reads(json: JsValue): JsResult[TranslationRule] = {
+      return JsSuccess(new TranslationRule(
+        json("fromLanguage").as[LanguageID],
+        json("toLanguage").as[LanguageID],
+        json("provider").as[PluginID]
+      ))
+    }
+
+    def writes(transRule: TranslationRule): JsValue = {
+      return Json.obj(
+        "fromLanuage" -> Json.toJson(transRule.fromLanguage),
+        "toLanguage" -> Json.toJson(transRule.toLanguage),
+        "provider" -> Json.toJson(transRule.provider)
+      )
+    }
+  }
+}
+@
+
+\subsubsection{Reasoning}
+The most important rule is a [[ReasoningRule]].
+Unfortunately, it is also one of the most complicated.
+The outer structure is simple:
+operating on a language through a plug-in,
+an operation is applied.
+<<Reasoning rule>>=
+class ReasoningRule(
+  val language: LanguageID,
+  val provider: PluginID,
+  val identifier: String
+) extends Rule
+{
+  val name = s"Reasoning in $language by $provider (type $identifier)"
+
+  <<Apply the reasoning rule>>
+
+  def render(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins) {
+
+  }
+  def dialog(goal: Goal, components: Set[Label], plugins: Plugins): Future[JsValue] = {
+    return Future{JsNull}
+  }
+}
+<<Serialize a reasoning rule>>
+@
+
+Actually performing this operation is,
+for the most part,
+left to the plug-in.
+It is the expert, so we trust it.
+We must simply provide a goal it can read,
+and then combine back the modified goal with the information we stripped.
+<<Apply the reasoning rule>>=
+def apply(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins): Future[Seq[Goal]] = {
+  <<Create a new goal that has only the right formulae>>
+  <<Send this new goal along with necessary extra info to the plug-in>>
+  <<Re-insert the unused formulae into the new goal>>
+}
+@
+
+The hard work with finding the formula component has already been done,
+supplied as the parameter [[components]]---%
+this is of length one, although we have to check.
+<<Create a new goal that has only the right formulae>>=
+if (components.size != 1) return Future{List()}
+val formula = goal(components.head)
+@
+@ This gives us a specific [[formula]],
+which the plug-in will be able to fully understand.
+
+Once we have the formula,
+we need to send it to the plug-in for processing.
+This will return a future with the JSON we need.
+<<Send this new goal along with necessary extra info to the plug-in>>=
+val newFormulaeFuture = plugins(provider).flatMap{ _.query(
+  "reason",
+  s"apply?id=$identifier",
+  Json.obj(
+    "goal" -> Json.toJson(formula),
+    "extraInfo" -> (extraInfo match { case Some(info) => info case None => JsNull})
+  )
+)}.map { json => {
+  if (json("result").as[String] == "failure") {
+    val message = json("reason").as[String]
+    throw new PluginError(message)
+  } else {
+    json("newGoals").as[Seq[Formula]]
+  }
+}}
+@
+@ Slightly misleadingly, the reasoner looks for ``goal'' in the JSON
+when we are sending a formula.
+This is because, conceptually,
+the formula is ideally a stand-alone goal.
+
+Finally, we must take the new formulae
+and insert it back where it came from in the goal.
+<<Re-insert the unused formulae into the new goal>>=
+return newFormulaeFuture.map { newFormulae =>
+  newFormulae.map { newFormula =>
+    val updatedFormulae = ((goal.formulae.filter { f => !(components contains f.label)})
+                           + newFormula)
+    new Goal(updatedFormulae, newFormula.variables union goal.variables)
+  }
+}
+@
+
+Lastly, we must provide a way to serialize these rules.
+<<Serialize a reasoning rule>>=
+object ReasoningRule
+{
+  implicit val ReasoningRuleFormat: Format[ReasoningRule] = new Format[ReasoningRule] {
+    def reads(json: JsValue): JsResult[ReasoningRule] = {
+      return JsSuccess(new ReasoningRule(
+        json("language").as[LanguageID],
+        json("provider").as[PluginID],
+        json("identifier").as[String]
+      ))
+    }
+
+    def writes(rule: ReasoningRule): JsValue = {
+      return Json.obj(
+        "language" -> Json.toJson(rule.language),
+        "provider" -> Json.toJson(rule.provider),
+        "identifier" -> Json.toJson(rule.identifier)
+      )
+    }
+  }
+}
+@
+
+
+\subsubsection{Definition extraction}
+<<Extraction rule>>=
+
+@
+
+\subsubsection{Definition substitution}
+<<Substitution rule>>=
+
+@
+
+\subsection{Plug-ins}
+\ReMix{} cannot do much by itself,
+because each of the rules above makes a call out to a plug-in.
+These plug-ins are where all the actually work takes place---%
+we simply co-ordinate it.
+
+First, we must define what a plug-in \emph{is}.
+A plug-in is essentially a URL that responds to RESTful calls to a standard API.
+However, we do wrap up this a bit with some niceties,
+such as an ID, a name, a website, a version, a description, and an icon.
+But fundamentally, we need only a [[base]] URL and a set of services along with their endpoints.
+<<models/Plugin.scala>>=
+package remix.models
+
+<<Model imports>>
+
+class Plugin (
+  val id: PluginID,
+  val name: String,
+  val website: String,
+  val version: String,
+  val description: String,
+  val icon: String,
+  val base: String,
+  val provides: Map[String, String]
+)
+{
+  <<Send a query to the plug-in>>
+}
+
+object Plugin
+{
+  <<Read JSON to become a Plugin>>
+  <<Write a Plugin to JSON>>
+}
+@
+<<Makefile build entry>>=
+notangle -Rmodels/Plugin.scala $< > main/scala/models/Plugin.scala
+@
+@ Two useful utilities are included: JSON serialisation and deserialisation.
+The deserialisation is most useful, as it allows us to take the output of a request to the plug-in server
+and produce a plug-in object with minimal fuss.
+<<Read JSON to become a Plugin>>=
+implicit val PluginReads: Reads[Plugin] = new Reads[Plugin] {
+  def reads(json: JsValue): JsResult[Plugin] = {
+    return JsSuccess(new Plugin(
+      json("id").as[PluginID],
+      json("name").as[String],
+      json("website").as[String],
+      json("version").as[String],
+      json("description").as[String],
+      json("icon").as[String],
+      json("base").as[String],
+      json("provides").as[Map[String,String]]
+    ))
+  }
+}
+@
+@ Similarly there may be the need to serialise a plug-in to JSON.
+<<Write a Plugin to JSON>>=
+implicit val PluginWrites: Writes[Plugin] = new Writes[Plugin] {
+  def writes(p: Plugin): JsValue = {
+    return Json.obj(
+      "id" -> p.id,
+      "name" -> p.name,
+      "website" -> p.website,
+      "version" -> p.version,
+      "description" -> p.description,
+      "icon" -> p.icon,
+      "base" -> p.base,
+      "provides" -> Json.toJson(p.provides)
+    )
+  }
+}
+@
+
+A plug-in should be able to direct queries to the correct location,
+so that the rest of the system can follow the known REST API structure
+and simply pass the information through.
+<<Send a query to the plug-in>>=
+private def joinURL(first: String, second: String): String = {
+  return if (second == "") {
+    first
+  } else if (!first.endsWith("/") && !second.startsWith("/")) {
+    first + "/" + second
+  } else if (first.endsWith("/") && second.startsWith("/")) {
+    first + second.slice(0, 1)
+  } else {
+    first + second
+  }
+}
+
+def query(
+  service: String,
+  endpoint: String,
+  postData: JsValue = JsNull
+): Future[JsValue] =
+{
+  val fullURL = joinURL(base,
+                  joinURL(provides(service), endpoint))
+  if (postData == JsNull) {
+    return PluginClient.GET(fullURL)
+  } else {
+    return PluginClient.POST(fullURL, postData)
+  }
+}
+@
+@ A simple function with an almost-as-simple helper to put the URL together.
+But this is because all the heavy lifting happens in the [[PluginClient]].
+
+The [[PluginClient]] object is responsible for handling communication to the plug-ins,
+which is the only thing that the core need communicate with directly.
+<<clients/PluginClient.scala>>=
+package remix.clients
+
+<<Client imports>>
+
+object PluginClient
+{
+  implicit val system = ActorSystem()
+  implicit val materializer = ActorMaterializer()
+  val ws = AhcWSClient()
+
+  <<Send a GET request>>
+  <<Send a POST request>>
+}
+@
+<<Makefile build entry>>=
+notangle -Rclients/PluginClient.scala $< > main/scala/clients/PluginClient.scala
+@
+@ The Play framework makes this relatively straightforward.
+First, a [[GET]] request.
+<<Send a GET request>>=
+def GET(url: String): Future[JsValue] = {
+  val response: Future[WSResponse] = ws
+    .url(url)
+    .withHttpHeaders("Accept" -> "application/json")
+    .withHttpHeaders("Cache-Control" -> "no-cache")
+    .withRequestTimeout(60.seconds)
+    .get()
+  return response.map {
+    r => {r.json}
+  } .recover {
+    case t: java.net.ConnectException => JsArray()
+  }
+}
+@
+@ And then, a [[POST]] request.
+<<Send a POST request>>=
+def POST(url: String, data: JsValue): Future[JsValue] = {
+  val response: Future[WSResponse] = ws
+    .url(url)
+    .withHttpHeaders("Content-Type" -> "application/json")
+    .withHttpHeaders("Accept" -> "application/json")
+    .withHttpHeaders("Cache-Control" -> "no-cache")
+    .withRequestTimeout(60.seconds)
+    .post(data)
+  return response.map {
+    r => {r.json}
+  } .recover {
+    case t: java.net.ConnectException => JsArray()
+  }
+}
+@
+
+A single plug-in does not a useful tool make.
+To manage all the plug-ins, we define a singleton class
+to load and manage all the plug-ins.
+<<models/Plugins.scala>>=
+package remix.models
+
+<<Model imports>>
+
+import com.google.inject.AbstractModule
+
+@Singleton
+class Plugins
+{
+  val pluginsSources: Seq[String] = loadListOfPluginSources()
+  val pluginsByID: Future[Map[PluginID,Plugin]] = loadAllPlugins(pluginsSources)
+
+  <<Load a list of all the plug-in sources>>
+  <<Load all the plug-ins>>
+  <<Plugins utility methods>>
+}
+
+<<Load Plugins eagerly>>
+@
+<<Makefile build entry>>=
+notangle -Rmodels/Plugins.scala $< > main/scala/models/Plugins.scala
+@
+@ One minor niggle is that the [[Plugins]] singleton is not loaded at start-up,
+but lazily upon first request.
+We can fix that quite simply.
+<<Load Plugins eagerly>>=
+class PluginsModule extends AbstractModule {
+  override def configure() = {
+    bind(classOf[Plugins]).asEagerSingleton()
+  }
+}
+@
+<<resources/application.conf>>=
+play.modules.enabled += "remix.models.PluginsModule"
+@
+
+To keep things simple, when determining which plug-ins are available,
+we will read a file called [[/etc/remix.cfg]].
+This should be sufficient, until a proper ``App Store'' of plug-ins exists.
+<<Load a list of all the plug-in sources>>=
+private def loadListOfPluginSources(): Seq[String] = {
+  val configFile = Source.fromFile("/etc/remix.cfg")
+  return configFile.getLines.toSeq
+}
+@
+
+Once we know where they are coming from,
+we can load the plug-ins from the given URLs.
+This is surprisingly complicated, due to the way the Play framework functions.
+<<Load all the plug-ins>>=
+<<Load a single plug-in from a URL>>
+
+private def pluginMapFromSeq(plugins: Seq[Plugin]): Map[PluginID, Plugin] = {
+  return plugins.map {
+    (p) => (p.id -> p)
+  }.toMap
+}
+
+def loadAllPlugins(urls: Seq[String]): Future[Map[PluginID,Plugin]] = {
+  val emptyMap : Future[Map[PluginID,Plugin]] = Future{Map()}
+  val f: Future[Map[PluginID,Plugin]] = pluginsSources.foldLeft (emptyMap) ({
+    (pluginMapFuture, url) => {
+      val newMapExtensionFuture = loadPluginFromSource(url).map(pluginMapFromSeq)
+      for {
+        currentMap <- pluginMapFuture
+        extensionMap <- newMapExtensionFuture
+      } yield (currentMap ++ extensionMap)
+    }
+  })
+  f onComplete {
+    case Success(m) => m
+    case Failure(t) => println(t.getMessage)
+  }
+  return f
+}
+@
+@ To simplify the procedure, we have a helper function which loads all the plug-ins from a single URL.\@
+<<Load a single plug-in from a URL>>=
+def loadPluginFromSource(url: String): Future[Seq[Plugin]] = {
+  val pluginJsonFuture = PluginClient.GET(url)
+  return pluginJsonFuture.map{
+    (pluginJson) => {
+      pluginJson.as[Array[JsValue]].map {
+        pluginJS => pluginJS("plugin").as[Plugin]
+      }
+    }
+  }
+}
+@
+
+In order to make the [[Plugins]] singleton more usable,
+it comes with several useful but uncomplicated methods.
+We briefly outline them here.
+
+We might wish to get a sequence of the plug-in IDs.
+<<Plugins utility methods>>=
+def ids() : Future[Seq[PluginID]] = pluginsByID.map{ (m) => m.keys.toSeq }
+@
+
+Or alternatively just a sequence of the [[Plugin]] objects.
+<<Plugins utility methods>>=
+def plugins() : Future[Seq[Plugin]] = pluginsByID.map { (m) => m.values.toSeq }
+@
+
+It might also be useful to determine if a specific plug-in exists.
+<<Plugins utility methods>>=
+def contains(pluginID: PluginID): Future[Boolean] =
+  pluginsByID.map { (m) => m.contains(pluginID) }
+@
+
+Rapid access to specific plug-ins using their ID would be good.
+<<Plugins utility methods>>=
+def apply(pluginID: PluginID): Future[Plugin] =
+  pluginsByID.map { (m) => m(pluginID) }
+def get(pluginID: PluginID): Future[Option[Plugin]] =
+  pluginsByID.map { (m) => m.get(pluginID) }
+@
+
+Finally, we consider the case where we want to get all plug-ins which provide a given service.
+<<Plugins utility methods>>=
+def getProvidersForService(service: String): Future[Seq[Plugin]] =
+  pluginsByID.map{ pluginMap =>
+    pluginMap.values.filter {
+      plugin_obj => plugin_obj.provides.contains(service)
+    }.toSeq
+  }
+@
+
+
+
+
+\subsection{Database}
+\ReMix{} is a useful tool to extend and edit proofs,
+but a foundational part of this is \emph{actually storing the proof}.
+To this end, there is a database made available in much the same way as the [[Plugins]] singleton.
+This singleton will be quite simple, consisting of just four key actions:
+creating a proof, reading a proof, updating a proof, and deleting a proof.
+Auxiliary actions such as determining the next valid ID are also made available.
+Finally, actually connecting to the database needs to be convered.
+<<models/ReMixDatabase.scala>>=
+package remix.models
+
+<<Model imports>>
+
+import java.sql.{Connection,DriverManager}
+import com.google.inject.AbstractModule
+
+@Singleton
+class ReMixDatabase @Inject()(db: Database)
+{
+  <<Get all proof IDs from the database>>
+  <<Create a proof in the database>>
+  <<Read a proof from the database>>
+  <<Update a proof in the database>>
+  <<Delete a proof from the database>>
+}
+
+<<Load the database eagerly>>
+@
+<<Makefile build entry>>=
+notangle -Rmodels/ReMixDatabase.scala $< > main/scala/models/ReMixDatabase.scala
+@
+@ Like the [[Plugins]] object, it would be best to load this eagerly.
+<<Load the database eagerly>>=
+class ReMixDatabaseModule extends AbstractModule {
+  override def configure() = {
+    bind(classOf[ReMixDatabase]).asEagerSingleton()
+  }
+}
+@
+
+The database schema is relatively simple, for our purposes.
+A proof is given an ID, a name, and the JSON content,
+and stored in a MySQL database.
+Lets get a list of IDs so far.
+<<Get all proof IDs from the database>>=
+def getAllProofIDs(): Seq[Int] = {
+  val connection = db.getConnection()
+  val statement = connection.createStatement
+  try {
+    val rs = statement.executeQuery("SELECT file_id FROM files;")
+    val allIDs = new ListBuffer[Int]()
+    while (rs.next())
+      allIDs += rs.getInt("file_id")
+    return allIDs.toSeq
+  } catch {
+    case e: Throwable => return Nil
+  } finally {
+    connection.close()
+  }
+}
+@
+
+Adding a proof to the database is not much more complicated.
+<<Create a proof in the database>>=
+def createProof(proofName: String, proofJson: JsValue): Option[Int] = {
+  val connection = db.getConnection()
+  try {
+    val statement = connection.prepareStatement(
+      "INSERT INTO files (name, proof_json) VALUES (?, ?);",
+      Array("file_id")
+    )
+    statement.setString(1, proofName)
+    statement.setString(2, proofJson.toString)
+    statement.executeUpdate()
+    val rs = statement.getGeneratedKeys();
+    if (rs.next) return Some(rs.getInt(1))
+    else return None
+  } catch {
+    case e: Throwable => {println(e.toString); return None}
+  } finally {
+    connection.close()
+  }
+}
+@
+
+Reading a proof out is simple.
+<<Read a proof from the database>>=
+def readProofJSON(proofID: Int): Option[JsValue] = {
+  val connection = db.getConnection()
+  try {
+    val statement = connection.prepareStatement(
+      "SELECT proof_json FROM files WHERE (file_id = ?);"
+    )
+    statement.setInt(1, proofID)
+    val rs = statement.executeQuery()
+    if (rs.next) return Some(Json.parse(rs.getString(1)))
+    else return None
+  } catch {
+    case e: Throwable => {println(e.toString); return None}
+  } finally {
+    connection.close()
+  }
+}
+@
+
+Updating the proof likewise is not hard.
+<<Update a proof in the database>>=
+def updateProof(proofID: Int, proofJson: JsValue): Boolean = {
+  val connection = db.getConnection()
+  try {
+    val statement = connection.prepareStatement(
+      "UPDATE files SET proof_json = ? WHERE file_id = ?;"
+    )
+    statement.setString(1, proofJson.toString.replace("\n", " "))
+    statement.setInt(2, proofID)
+    statement.executeUpdate()
+    return true
+  } catch {
+    case e: Throwable => {println(e.toString); return false}
+  } finally {
+    connection.close()
+  }
+}
+@
+
+If a proof no longer needs to be stored, we can delete it from the database.
+We return a boolean indicating whether this was successful or not.
+<<Delete a proof from the database>>=
+def deleteProof(proofID: Int): Boolean = {
+  val connection = db.getConnection()
+  try {
+    val statement = connection.prepareStatement(
+      "DELETE FROM files WHERE (file_id = ?);"
+    )
+    statement.setInt(1, proofID)
+    statement.executeUpdate()
+    return true
+  } catch {
+    case e: Throwable => {println(e.toString); return false}
+  } finally {
+    connection.close()
+  }
+}
+@
+
+Finally, we need to specify the connection details.
+<<resources/application.conf>>=
+db.default.driver=com.mysql.jdbc.Driver
+db.default.url="jdbc:mysql://aarons-macbook.local:3306/remix?autoReconnect=true&useSSL=false"
+db.default.username="remixuser"
+db.default.password="7npJVFlVpFIZsULEYiK35AQKrvqkrdBZq27VlmEWCyCZO1oliA"
+@
+
+
+
+
+
+\section{Determining how to extend a proof}
+A proof is a static affair if there is no way for it to be extended to closure.
+Thus the \ReMix{} toolkit must make available all the rules that could be applied.
+This is a difficult task, requiring cooperation from the plug-ins,
+and knowledge about the state of the proof.
+
+Given there are four types of rule, we break the problem down into four sub-problems.
+<<Find the rules which could be applied>>=
+def findRules(plugins: Plugins): Future[Seq[RuleApplication]] = {
+  for {
+    transrules <- possibleTranslationRules(plugins);
+    reasonrules <- possibleReasoningRules(plugins);
+    extractrules <- possibleExtractionRules(plugins);
+    subrules <- possibleSubstitutionRules(plugins)
+  } yield (
+    transrules ++ reasonrules ++
+    extractrules ++ subrules
+  )
+}
+<<Find the available translation rules>>
+<<Find the available reasoning rules>>
+<<Find the available extraction rules>>
+<<Find the available substitution rules>>
+@
+@ Each of these we tackle in turn below.
+
+\subsection{Finding translation rules}
+A translation rules is relatively simple.
+It maps a formula from the source language to the target language,
+so long as a plug-in exists to perform this translation.
+Each plug-in is queried for the translations it can make,
+and any that match the source formula are retrieved.
+<<Find the available translation rules>>=
+def possibleTranslationRules(plugins: Plugins): Future[Seq[RuleApplication]] = {
+  plugins.getProvidersForService("translate").flatMap {
+    s => s.foldLeft(Future{Seq[RuleApplication]()}) {
+      (seq, plugin) =>
+      for {
+        current <- seq;
+        next <- {
+          <<Determine if a plug-in can translate from one of the goal formulae>>
+        }
+      } yield (current ++ next)
+    }
+  }
+}
+@
+
+To actually work out whether the plug-in can perform the required operation,
+we must query the endpoint [[<translate>]],
+e.g. [[my-plugin-site.com/api/translations]].
+Because there are possibly multiple languages in the goal right now,
+we check if the plug-in can translate any of the formulae it contains.
+We expect the result to be in a [[translations]] key,
+as a list of lists where the inner list is [[[``sourcelang'', ``targetlang'', ``automatic'']]].
+Because a ``list-of-lists'' is cumbersome,
+we interpret these inner lists as a triple.
+<<Determine if a plug-in can translate from one of the goal formulae>>=
+val translationsFuture: Future[Seq[(LanguageID, LanguageID, String)]] =
+  plugin.query("translate", "").map{
+    _("translations").as[Seq[(LanguageID, LanguageID, String)]]
+  }
+translationsFuture.map { s => s.flatMap{
+  translation => {
+    tail match {
+      case Some(tail) => tail.goals.flatMap { goal =>
+        <<Does the current translation work with the current goal?>>
+      }
+      case None => Nil
+    }
+  }
+}}
+@
+@ The specifics of checking whether a goal can benefit from a translation
+is not too difficult.
+If there is a formula with the language this translation starts at,
+then we could use it.
+Otherwise, this translation is useless with this goal.
+<<Does the current translation work with the current goal?>>=
+val ruleApps: ListBuffer[RuleApplication] = new ListBuffer()
+for (formula <- goal.formulae) {
+  if (formula.language == translation._1) {
+    val rule = new TranslationRule(
+      translation._1,
+      translation._2,
+      plugin.id
+    )
+    val automated = translation._3 == "automated"
+    ruleApps += new RuleApplication(rule, goal, Set(formula.label),
+                                    automated, None)
+  }
+}
+ruleApps
+@
+
+
+\subsection{Finding reasoning rules}
+In contrast to a translation rule,
+a reasoning rule is very complicated.
+Because a plug-in can reason in a single language,
+we must careful extract goal parts that are in a single language.
+The difficulty with this is that
+the goal placeholder tree might have formulae in the desired language
+scattered throughout it.
+We cannot just send all the formulae in the right language through,
+or else they might form a forest.
+We need to first compute this forest,
+and from then generate the collections of labels each rule will use.
+
+First, we cycle through all the plug-ins.
+<<Find the available reasoning rules>>=
+def possibleReasoningRules(plugins: Plugins): Future[Seq[RuleApplication]] = {
+  plugins.getProvidersForService("reason").flatMap {
+    s => s.foldLeft(Future{Seq[RuleApplication]()}) {
+      (seq, plugin) =>
+      for {
+        current <- seq;
+        next <- {
+          <<Find all reasoning rules this plug-in can provide for these goals>>
+        }
+      } yield (current ++ next)
+    }
+  }
+}
+@
+
+The tail of a proof can have multiple goals,
+so we have to consider all at once.
+<<Find all reasoning rules this plug-in can provide for these goals>>=
+val reasoningsFuture: Future[Seq[(LanguageID, String, String, String)]] =
+  plugin.query("reason", "").map {
+    _("reasoning").as[Seq[(LanguageID, String, String, String)]]
+  }
+reasoningsFuture.map { s => s.flatMap {
+  reasoner => {
+    tail match {
+      case Some(tail) => tail.goals.flatMap { goal =>
+        <<Is the current reasoner applicable?>>
+      }
+      case None => Nil
+    }
+  }
+}}
+@
+@ There are many striking similarities to how
+the translation rule functioned.
+Now, these are about to change.
+
+For a given [[reasoner]]---%
+that is a 4-tuple of language, automation, identifier, and description;
+all strings---%
+will this work on the current goal?
+There is no way to know without trying,
+but this could be very expensive.
+Instead, we focus on whether it \emph{could} work,
+and if so we produce the [[RuleApplication]].
+The definition we take for ``could work'' is simple:
+is it in the right language for some formula?
+<<Is the current reasoner applicable?>>=
+<<Grab all the formulae in the right language>>
+<<Construct the forest of related formulae>>
+forest.map { formulae =>
+  val rule = new ReasoningRule(reasoner._1, plugin.id, reasoner._3)
+  val labels = formulae.map{_.label}
+  val automated = reasoner._2 == "automated"
+  new RuleApplication(rule, goal, labels, automated, None)
+}
+@
+
+Collecting all the formulae with the right language is a simple filter,
+checking the formula language against the rule language.
+<<Grab all the formulae in the right language>>=
+val validFormulae = goal.formulae.filter{_.language == reasoner._1}
+@
+@ Slightly trickier is handling the forest construction.
+For this task, we use a breadth-first search until all [[validFormulae]] are accounted for.
+<<Construct the forest of related formulae>>=
+// TODO: Update later
+val forest = List(validFormulae)
+@
+
+Finally, the reasoning identifier,
+the penultimate tuple element from the plug-in,
+is entirely arbitrary from the point of view of \ReMix{}.
+This is used solely by the plug-in so that it is able to apply the correct line of reasoning requested by the user.
+Note that this shouldn't be a full breakdown
+to reconstruct the reasoning---%
+in fact, that suggests the reasoning is too specific--%
+but instead just enough to classify how the plug-in should behave.
+
+
+\subsection{Finding extraction rules}
+<<Find the available extraction rules>>=
+def possibleExtractionRules(plugins: Plugins): Future[Seq[RuleApplication]] = {
+  return Future{Nil}
+}
+@
+
+\subsection{Finding substitution rules}
+<<Find the available substitution rules>>=
+def possibleSubstitutionRules(plugins: Plugins): Future[Seq[RuleApplication]] = {
+  return Future{Nil}
+}
+@
+
+
+
+\section{Queries to the core}
+
+A tool is only useful if you can use it.
+To make \ReMix{} usable, we must expose the core in some way.
+With the goal of producing a web app,
+the simplest way forward is to produce a RESTful API for an interface to call.
+Within the Scala Play Framework,
+we do this by defining controllers.
+Each component of the \ReMix{} core will need its own controller,
+and so each is detailed in its own subsection.
+
+Some housekeeping before we go into detail:
+each JSON result contains a [[result]] key at the top-level.
+This contains either [[success]],
+or [[failure]], depending on the outcome of the query.
+<<success>>=
+"result" -> "success"
+@
+<<failure>>=
+"result" -> "failure"
+@
+@ Ideally, results are accompanied by a [[reason]],
+which is a human-readable explanation for the failure.
+
+\subsection{Plug-ins controller}
+\label{sec:plug-ins-controller}
+
+All controllers start with a similar layout.
+They are singletons extending an [[AbstractController]],
+acting mostly as a bridge between URLs and properties and methods of the models.
+<<controllers/PluginsController.scala>>=
+package remix.controllers
+
+<<Controller imports>>
+
+@Singleton
+class PluginsController @Inject()(cc: ControllerComponents, plugins: Plugins)
+    extends AbstractController(cc)
+{
+  <<Provide a list of all plug-ins>>
+  <<Get information about a plug-in>>
+}
+@
+<<Makefile build entry>>=
+notangle -Rcontrollers/PluginsController.scala $< > main/scala/controllers/PluginsController.scala
+@
+
+One fundamental job is to list which plug-ins are available.
+This is simply all the plug-in IDs arranged in a JSON array.
+<<Provide a list of all plug-ins>>=
+def list() =
+Action.async { implicit request: Request[AnyContent] =>
+  plugins.ids.map { ids =>
+    Ok(Json.obj(
+      <<success>>,
+      "plugins" -> JsArray(ids.map{ n => JsString(n) })
+    ))
+  }
+}
+@
+@ We handle this asyncronously in order to not block the thread.
+This leads to a more responsive app,
+while interacting more cleanly with the [[Future]]s returned from the model.
+
+To access this list of plug-ins, we expose the route [[/plugins]]
+to present the list.
+<<resources/routes>>=
+GET /plugins remix.controllers.PluginsController.list
+@
+@ This states that a [[GET]] request to [[/plugins]] should be handled by our list method.
+We also need to add this to the makefile:
+<<Makefile build entry>>=
+notangle -Rresources/routes $< > main/resources/routes
+@
+
+We also expose more detailed information about each plug-in via the
+[[/plugins/<plugin-id>]] and [[plugins/<plugin-id>/<feature>]] routes.
+<<resources/routes>>=
+GET /plugins/:pluginID remix.controllers.PluginsController.aboutAllFeatures(pluginID: String)
+GET /plugins/:pluginID/:feature remix.controllers.PluginsController.aboutFeature(pluginID: String, feature :String)
+@
+@ To actually answer these queries,
+we use a single function and a wrapper [[aboutAllFeatures]] to answer.
+This method must do quite a bit of error handling because there are numerous ways this can go wrong.
+<<Get information about a plug-in>>=
+def aboutFeature(pluginIDStr: String, feature: String) =
+Action.async { implicit request: Request[AnyContent] =>
+  val pluginID = pluginIDStr.pluginID
+  plugins.contains(pluginID).flatMap { havePlugin =>
+    if (!havePlugin) {
+      <<Plug-in does not exist>>
+    } else if (feature == "all") {
+      <<All plug-in information>>
+    } else {
+      <<Provide information about the correct feature>>
+    }
+  }
+}
+@
+@ There are four cases: the plug-in does not exist;
+the feature is ``all'', in which case all the details about a plug-in should be returned;
+the plug-in exists, but the feature is not ``all'' and is not a valid feature;
+or finally the plug-in does exist and this is a feature and we can return it.
+
+If the plug-in does not exist, we simply error out.
+<<Plug-in does not exist>>=
+Future { BadRequest(Json.obj(
+  <<failure>>,
+  "reason" -> s"Plug-in '$pluginID' does not exist."
+)) }
+@
+
+If the feature is ``all'', then give back the whole plugin.
+<<All plug-in information>>=
+plugins(pluginID).map { plugin =>
+  Ok(Json.obj(
+    <<success>>,
+    "plugin" -> Json.toJson(plugin)
+  ))
+}
+@
+
+Now we can attempt to give back detailed feature information.
+We try and get the appropriate information, otherwise we return an error.
+<<Provide information about the correct feature>>=
+ plugins(pluginID).map { plugin =>
+   try {
+     val featVal = feature match {
+       case "id"          => Json.toJson(plugin.id)
+       case "name"        => Json.toJson(plugin.name)
+       case "website"     => Json.toJson(plugin.website)
+       case "version"     => Json.toJson(plugin.version)
+       case "description" => Json.toJson(plugin.description)
+       case "icon"        => Json.toJson(plugin.icon)
+       case "base"        => Json.toJson(plugin.base)
+       case "provides"    => Json.toJson(plugin.provides)
+     }
+     Ok(Json.obj(
+       <<success>>,
+       feature -> featVal
+     ))
+   } catch {
+     case e: MatchError => BadRequest(Json.obj(
+       <<failure>>,
+       "reason" -> s"Unknown plug-in attribute '$feature'."
+     ))
+   }
+ }
+@
+
+The wrapper method [[aboutAllFeatures]] is trivial:
+<<Get information about a plug-in>>=
+def aboutAllFeatures(pluginIDStr: String) = aboutFeature(pluginIDStr.pluginID, "all")
+@
+
+
+\subsection{Proof controller}
+\label{sec:proof-controller}
+
+Now that we have plug-ins, we need to be able to interact with a proof.
+For this purpose,
+we have a proof controller which can be used to query or update a proof.
+There are many ways to update a proof,
+so for now we focus on the simplest aspects:
+proof creation, deletion, and state.
+
+<<controllers/ProofController.scala>>=
+package remix.controllers
+
+<<Controller imports>>
+
+@Singleton
+class ProofController @Inject()(cc: ControllerComponents, rmdb: ReMixDatabase, plugins: Plugins)
+    extends AbstractController(cc)
+    with ProofActions
+{
+  <<List all proofs>>
+  <<Create a proof>>
+  <<Delete a proof>>
+  <<Get the state of a proof>>
+  <<Present ways to extend the given proof>>
+  <<Extend the proof by one step>>
+  <<Remove a step from the proof>>
+}
+@
+<<Makefile build entry>>=
+notangle -Rcontrollers/ProofController.scala $< > main/scala/controllers/ProofController.scala
+@
+
+Let us start with something simple: listing all proof documents.
+This is just a single call to the database.
+<<List all proofs>>=
+def list() = Action { implicit request: Request[AnyContent] =>
+  // TODO: Get user, show only relevant documents.
+  val proofIDs = rmdb.getAllProofIDs()
+  Ok(Json.obj(
+    <<success>>,
+    "proofs" -> Json.toJson(proofIDs)
+  ))
+}
+@
+@ We want this to be simple to access, so we expose it as [[/proofs]].
+<<resources/routes>>=
+GET /proofs remix.controllers.ProofController.list
+@
+
+Before the remaining parts make sense,
+it is best to consider how to create a proof.
+A proof class has already been defined,
+so at the most basic level we need only take a set of starting goals and initialize the proof object.
+We take these goals as a POST parameter and the name of the proof as part of the URL,
+and give back the ID of the new proof.
+The caller is expected to provide this in future API requests for this proof.
+<<Create a proof>>=
+def create(proofName: String) =
+Action(parse.json) { implicit request: Request[JsValue] =>
+  val json = request.body
+  val startingGoals = json.as[Seq[Goal]]
+  val proof = new Proof(proofName, startingGoals)
+  val proofJson = Json.toJson(proof)
+  val optID = rmdb.createProof(proofName, proofJson)
+  optID match {
+    case Some(proofID) => Ok(Json.obj(
+      <<success>>,
+      "proofID" -> proofID
+    ))
+    case None => BadRequest(Json.obj(
+      <<failure>>,
+      "reason" -> "Proof could not be created in database."
+    ))
+  }
+}
+@
+
+We expose the access point [[/proofs/create/<name>]],
+nice and simple.
+<<resources/routes>>=
+POST /proofs/create/:name remix.controllers.ProofController.create(name)
+@
+
+Once a proof has been created, the obvious extension is the opposite:
+deleting a proof.
+This is a simpler operation, as it is mostly just calling the predefined database methods.
+<<Delete a proof>>=
+def delete(proofID: Int) =
+Action { implicit request: Request[AnyContent] =>
+  val succeeded = rmdb.deleteProof(proofID)
+  succeeded match {
+    case true => Ok(Json.obj(
+      <<success>>
+    ))
+    case false => BadRequest(Json.obj(
+      <<failure>>,
+      "reason" -> "Proof could not be deleted from the database."
+    ))
+  }
+}
+@
+@ Nothing too complicated.
+The access point is at [[/proofs/<proofID>/delete]].
+<<Routes for a specific proof>>=
+GET /proofs/:proofID/delete remix.controllers.ProofController.delete(proofID: Int)
+@
+
+Retrieving a proof from the database is quite fundamental, and thankfully not difficult,
+thanks to a custom action that handles
+obtaining the proof for us
+(see Appendix~\ref{sec:proofaction}).
+<<Get the state of a proof>>=
+def read(proofID: Int) =
+withProof(rmdb, proofID, save=false) {
+    (proof, _) =>
+Action.async {
+    implicit request: Request[AnyContent] =>
+
+  Future{Ok(Json.obj(
+      <<success>>,
+      "proof" -> Json.toJson(proof)
+  ))}
+}}
+@
+@ We also make sure to provide an access point, [[/proofs/<id>]].
+Because this is a top-level proof,
+it must be the last of the [[/proofs/<id>]] endpoints.
+<<resources/routes>>=
+<<Routes for a specific proof>>
+GET /proofs/:proofID remix.controllers.ProofController.read(proofID: Int)
+@
+
+With the simple actions out of the way,
+we turn to something more complicated---%
+editing the proof.
+There are two ways to edit a proof:
+you can extend it by a single step,
+or you can contract it by a single step.
+Both of these mean a proof acts as a stack,
+where the proof can only change length at one end.
+A user may also wish to edit intermediate steps of a proof,
+but for now we do not allow this action.
+
+To extend the proof by a single step,
+there must be a rule application.
+A rule application comes in two flavours:
+automated, and manual.
+An automated rule is a ``one-click'' system,
+where the user simply selects that as the next action and it happens.
+A manual rule requires their intervention;
+when the user attempts to extend the proof by a manual rule,
+the plug-in who provides that rule
+will present the user with a dialog box to enter the required information.
+<<Extend the proof by one step>>=
+def extend(proofID: Int) =
+withProof(rmdb, proofID) {
+    (proof, save) =>
+Action.async {
+    implicit request: Request[AnyContent] =>
+
+  val ruleApplication = request.body.asJson.get.as[Option[RuleApplication]].get
+  if (!ruleApplication.automated) {
+    <<Query user about extra information for non-automated rules>>
+    // The client must start the request again, with the full information,
+    // and this time create an automated rule.
+  }
+  else {
+    <<Apply the rule to extend the proof>>
+  }
+}}
+@
+<<Routes for a specific proof>>=
+POST /proofs/:proofID/apply remix.controllers.ProofController.extend(proofID: Int)
+@
+@ The JSON for the rule application is given as POST data.
+It is read directly and turned into a [[Rule]] instance.
+
+As a quick aside:
+It would be useful to let the user know what rules are available,
+however.
+To this end, we also provide a [[GET]]-flavoured [[extend]] endpoint,
+which lists the available rules the user could apply.
+<<Present ways to extend the given proof>>=
+def extensionOptions(proofID: Int) =
+withProof(rmdb, proofID, save=false) {
+    (proof, _) =>
+Action.async {
+    implicit request: Request[AnyContent] =>
+
+  proof.findRules(plugins).map {
+    rules => Ok(Json.obj(
+      <<success>>,
+      "rules" -> JsArray(rules.map{Json.toJson(_)})
+    ))
+  }
+}}
+@
+<<Routes for a specific proof>>=
+GET /proofs/:proofID/extend remix.controllers.ProofController.extensionOptions(proofID: Int)
+@
+
+Next, we check that the rule is fully automated.
+If this is not the case,
+then there is more information needed from the user.
+We ask the plug-in to provide a JSON description of the dialog
+(the format of which is detailed in section~\ref{sec:user-interaction})
+so that this method can be re-called
+with all the necessary details for it to be fully automated.
+<<Query user about extra information for non-automated rules>>=
+ruleApplication.dialog(plugins).map {dialogJSON =>
+  Ok(Json.obj(
+    "result" -> "partial",
+    "dialogDescriptor" -> dialogJSON
+  ))
+}
+@
+
+Assuming the user completes the dialog requirements
+and the method is called again with sufficient details,
+the proof extension can continue.
+At this point, there is a valid [[RuleApplication]] object
+which we can use to call the proof's extension mechanism.
+<<Apply the rule to extend the proof>>=
+proof.extend(ruleApplication, plugins)
+save(proof,
+Future{ Ok(Json.obj(
+  <<success>>,
+  "proof" -> Json.toJson(proof)
+))}
+)
+@
+
+The oppose of extending a proof is to contract a proof.
+This should happen only at the tail, but we do allow it at any point for convenience.
+It is only recommended to work at the end of a proof.
+<<Remove a step from the proof>>=
+def pop(proofID: Int, index: Int) =
+withProof(rmdb, proofID) {
+    (proof, save) =>
+Action.async {
+    implicit request: Request[AnyContent] =>
+
+  proof.pop(index)
+  save(proof,
+  Future{Ok(Json.obj(
+    <<success>>,
+    "proof" -> Json.toJson(proof)
+  ))}
+  )
+}}
+@
+<<Routes for a specific proof>>=
+GET /proofs/:proofID/pop remix.controllers.ProofController.pop(proofID: Int, index: Int ?= -1)
+@
+@ An index value of [[-1]] is treated as the last item,
+so pop behaves as its stack equivalent.
+
+
+\section{User interaction}
+\label{sec:user-interaction}
+
+
+\section{Conclusion}
+
+\clearpage
+\appendix
+
+\section{Makefile for \ReMix{}}
+
+It is worthwhile providing a Makefile for this project,
+simply because it is quite complex to run the \texttt{noweb} commands.
+We also provide a way to produce the PDF documentation.
+
+The individual source files are introduced at various points in this document,
+so ``tangling'' is defined at the same place.
+This Makefile is extracted by the Makefile one directory above this,
+so it should all be built automatically.
+If for some reason it is not, please run
+\begin{verbatim}
+notangle -RMakefile ReMix.scala-nw | unexpand --first-only > Makefile
+\end{verbatim}
+and then \texttt{make}. Possible targets (which are both made by default) are \texttt{source} and \texttt{pdf}.
+
+<<Makefile>>=
+.PHONY: all
+all: source pdf
+
+.PHONY: clean
+clean:
+	rm -rf auto
+	latexmk -C -f
+	rm ReMix.tex
+	rm -rf main
+
+.PHONY: directories
+directories:
+	mkdir -p main/resources
+	mkdir -p main/scala/controllers
+	mkdir -p main/scala/models
+	mkdir -p main/scala/clients
+
+pdf: ReMix.scala-nw
+	noweave -delay $< > ReMix.tex
+	latexmk -pdf
+
+source: ReMix.scala-nw directories
+	<<Makefile build entry>>
+
+makefile: ReMix.scala-nw
+	notangle -RMakefile ReMix.scala-nw | unexpand --first-only > Makefile
+@
+
+
+\section{Allowing access via any URL}
+The following is dangerous, but useful.
+<<resources/application.conf>>=
+play.http.session.cookieName="REMIX_SESSION"
+play.filters.disabled+=play.filters.hosts.AllowedHostsFilter
+play.filters.disabled+=play.filters.csrf.CSRFFilter
+play.filters.enabled+=play.filters.cors.CORSFilter
+play.filters.cors {
+  allowedOrigins = null
+}
+@
+<<Makefile build entry>>=
+notangle -Rresources/application.conf $< > main/resources/application.conf
+@
+
+
+\section{Miscellaneous definitions}
+
+<<Controller imports>>=
+import javax.inject._
+import play.api._
+import play.api.mvc._
+import play.api.libs.json._
+
+import remix.models._
+@
+
+<<Model imports>>=
+import scala.io._
+import scala.util.{Try, Success, Failure}
+import scala.concurrent._
+import scala.concurrent.duration._
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.collection.mutable.ListBuffer
+
+import javax.inject.{Inject, Singleton}
+import play.api.db._
+import play.api.libs.json._
+
+import remix.clients._
+import remix.types._
+@
+
+<<Client imports>>=
+import javax.inject.Inject
+
+import scala.io._
+import scala.concurrent.Future
+import scala.concurrent.duration._
+
+import play.api._
+import play.api.mvc._
+import play.api.db._
+import play.api.libs.ws._
+import play.api.libs.json._
+import play.api.http.HttpEntity
+import play.api.libs.ws.ahc.AhcWSClient
+
+import akka.actor.ActorSystem
+import akka.stream.ActorMaterializer
+import akka.stream.scaladsl._
+import akka.util.ByteString
+
+import scala.concurrent.ExecutionContext.Implicits.global
+
+import remix.types._
+@
+
+<<Controller imports>>=
+import javax.inject._
+
+import play.api._
+import play.api.mvc._
+import play.api.libs.json._
+import play.api.libs.Files._
+
+import scala.concurrent.Future
+import scala.concurrent.ExecutionContext.Implicits.global
+
+import remix.models._
+import remix.types._
+@
+
+\section{Custom actions}
+
+This project uses several actions that are not,
+by default,
+a part of the Scala Play framework.
+Here we provide full definitions.
+
+\subsection{ProofAction}
+\label{sec:proofaction}
+<<controllers/ProofAction.scala>>=
+package remix.controllers
+
+<<Controller imports>>
+
+trait ProofActions extends Results
+{
+  def withProof(
+    rmdb: ReMixDatabase,
+    proofID: Int,
+    save: Boolean = true
+  )(block:(Proof, (Proof, Future[Result]) => Future[Result])=> Action[AnyContent]) = {
+    rmdb.readProofJSON(proofID) match {
+      case Some(proofJson) => {
+        println("Read in proof from database")
+        val proof = proofJson.as[Proof]
+        def saver(proof: Proof, futRes: Future[Result]) = {
+          val proofJSON = Json.toJson(proof)
+          println("Saving proof to database.")
+          val saved = rmdb.updateProof(proofID, proofJSON)
+          saved match {
+            case true => futRes
+            case false => Future { BadRequest(Json.obj(
+                <<failure>>,
+                "reason" -> s"Proof '$proofID' could not be saved back to database."
+              ))}
+          }
+        }
+        block(proof, saver)
+      }
+      case None => Action { BadRequest(Json.obj(
+        <<failure>>,
+        "reason" -> s"Proof with ID '$proofID' not found in database."
+      ))}
+    }
+  }
+}
+
+@
+<<Makefile build entry>>=
+notangle -Rcontrollers/ProofAction.scala $< > main/scala/controllers/ProofAction.scala
+@
+
+
+
+\section{Types}
+<<models/Types.scala>>=
+package remix
+
+<<Model imports>>
+
+package object types {
+
+  case class LanguageID(value: String) extends AnyVal
+  implicit def LanguageID2string(l: LanguageID) = l.value
+  implicit val languageIDFormat = new Format[LanguageID] {
+    def reads(json: JsValue): JsResult[LanguageID] = JsSuccess(json.as[String].languageID)
+    def writes(langID: LanguageID): JsValue = JsString(langID.value)
+  }
+
+  case class PluginID(value: String) extends AnyVal
+  implicit def PluginID2string(p: PluginID) = p.value
+    implicit val pluginIDFormat = new Format[PluginID] {
+    def reads(json: JsValue): JsResult[PluginID] = JsSuccess(json.as[String].pluginID)
+    def writes(pID: PluginID): JsValue = JsString(pID.value)
+  }
+
+  case class Label(value: String) extends AnyVal
+  implicit def Label2string(l: Label) = l.value
+  implicit val labelFormat = new Format[Label] {
+    def reads(json: JsValue): JsResult[Label] = JsSuccess(json.as[String].label)
+    def writes(label: Label): JsValue = JsString(label.value)
+  }
+
+  case class Variable(value: String) extends AnyVal
+  implicit def Variable2string(v: Variable) = v.value
+  implicit val variableFormat = new Format[Variable] {
+    def reads(json: JsValue): JsResult[Variable] = JsSuccess(json.as[String].variable)
+    def writes(variable: Variable): JsValue = JsString(variable.value)
+  }
+
+  implicit class TaggedString(val s: String) extends AnyVal {
+    def languageID = LanguageID(s)
+    def pluginID = PluginID(s)
+    def label = Label(s)
+    def variable = Variable(s)
+  }
+
+  implicit def optionFormat[T: Format]: Format[Option[T]] = new Format[Option[T]] {
+    def reads(json: JsValue): JsResult[Option[T]] = {
+      return JsSuccess(
+        if (json == JsNull) None
+        else Some(json.as[T])
+      )
+    }
+    def writes(optVal: Option[T]): JsValue = {
+      return optVal match {
+        case Some(v) => Json.toJson(v)
+        case None => JsNull
+      }
+    }
+  }
+}
+@
+<<Makefile build entry>>=
+notangle -Rmodels/Types.scala $< > main/scala/models/Types.scala
+@
+
+\section{Errors}
+<<models/Errors.scala>>=
+package remix.models
+
+class PluginError(message: String) extends Exception(message) {
+
+  def this(message: String, cause: Throwable) {
+    this(message)
+    initCause(cause)
+  }
+
+  def this(cause: Throwable) {
+    this(Option(cause).map(_.toString).orNull, cause)
+  }
+
+  def this() {
+    this(null: String)
+  }
+}
+@
+<<Makefile build entry>>=
+notangle -Rmodels/Errors.scala $< > main/scala/models/Errors.scala
+@
+
+\end{document}

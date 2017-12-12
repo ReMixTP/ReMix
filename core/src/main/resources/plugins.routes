@@ -1,5 +1,0 @@
-# Routes
-
-GET     /                       core.controllers.PluginsController.list
-GET     /:plugin                core.controllers.PluginsController.aboutAll(plugin: String)
-GET     /:plugin/:feature       core.controllers.PluginsController.about(plugin: String, feature: String)

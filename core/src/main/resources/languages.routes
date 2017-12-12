@@ -1,5 +1,0 @@
-# Routes
-
-GET     /                      core.controllers.LanguagesController.list
-GET     /:language             core.controllers.LanguagesController.about(language: String)
-POST    /:language/verify      core.controllers.LanguagesController.verify(language: String)
