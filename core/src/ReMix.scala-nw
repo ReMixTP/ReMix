@@ -2,6 +2,7 @@
 \usepackage{noweb}
 \usepackage[T1]{fontenc}
 \usepackage{fontspec}
+\usepackage[margin=30mm]{geometry}
 \usepackage{amsmath}
 \usepackage{amsthm}
 \usepackage{amssymb}
@@ -13,7 +14,7 @@
 \usepackage{xifthen}
 \modulolinenumbers[5]
 
-\setmonofont{Menlo}[Scale=0.75]
+\setmonofont{Menlo}[Scale=0.8]
 
 \bibliographystyle{acm}
 
@@ -89,8 +90,9 @@ The UI itself is not as thoroughly documented anywhere,
 but nor does it need to be,
 serving only as a window to the core.
 
-\section{The core}
-\subsection{Proofs, goals, and formulae}
+\section{Inside the core}
+\subsection{Proofs}
+\label{sec:proofs}
 \ReMix{} is all about proof: finding and verifying proofs that are heterogeneous in nature.
 To that end, one of the fundamental parts of \ReMix{} is the [[Proof]] class.
 A proof is a sequence of [[ProofStep]]s, each containing [[Goal]]s to be eliminated.
@@ -137,7 +139,7 @@ This also reflects the philosophy of \ReMix{}:
 as they should be fully understood by the theorem provers being plugged in
 and generated appropriately.
 
-A proof needs to be saved out to file storage in some way,
+A proof needs to be saved out to file storage in some way (see \S\ref{sec:database}),
 so it needs to be serializable to JSON
 (and of course the reverse as well).
 <<models/Proof.scala>>=
@@ -149,20 +151,7 @@ object Proof
       val proofHead = json("steps").as[Option[ProofStep]]
       val proof = new Proof(proofName)
       proof.head = proofHead
-      var ptr: Option[ProofStep] = proof.head
-      var prev: Option[ProofStep] = None
-      while (ptr != None) {
-        ptr match {
-          case Some(p) => p.prev = prev
-          case None => None
-        }
-        prev = ptr
-        ptr = ptr match {
-          case Some(ptr) => ptr.next
-          case None => throw new Exception // This should never happen.
-        }
-      }
-      proof.tail = prev
+      <<Read prev links from JSON>>
       return JsSuccess(proof)
     }
 
@@ -201,17 +190,42 @@ object ProofStep
 }
 @
 
-Because a proof is a linked list,
-we can give it methods similar to those we would expect to see in a linked list.
-We can append a new element on the end simply enough.
-Note that we do need to be given a reference to the plug-ins,
+
+The structure of a [[Proof]] makes it tedious to read from JSON.
+While the [[next]] pointer is easily encoded in JSON,
+the [[prev]] pointer is much more frustrating.
+We insert these after-the-fact by walking the linked list and manually inserting them.
+<<Read prev links from JSON>>=
+var ptr: Option[ProofStep] = proof.head
+var prev: Option[ProofStep] = None
+while (ptr != None) {
+  ptr match {
+    case Some(p) => p.prev = prev
+    case None => None
+  }
+  prev = ptr
+  ptr = ptr match {
+    case Some(ptr) => ptr.next
+    case None => throw new Exception // This should never happen.
+  }
+}
+proof.tail = prev
+@
+@ Note the line marked with a comment:
+the [[while]] guard should prevent this from ever occuring.
+
+We imbue a [[Proof]] with methods similar to those on a linked list.
+We can append a new element on the end through proof extension.
+Note that we need to be given a reference to the plug-ins,
 so that the rule application can query them.
+This is an [[implicit]] parameter,
+so it doesn't pollute the calling code.
 <<Extend the proof by a single step>>=
-def extend(ruleApp: RuleApplication, plugins: Plugins) {
-  val newGoals = Await.result(ruleApp.apply(plugins: Plugins), 10.seconds)
+def extend(ruleApp: RuleApplication)(implicit plugins: Plugins) {
+  val newGoals = Await.result(ruleApp.apply, 10.seconds)
   // MUST do work before continuing
   // Note that the above may have thrown a PluginError.
-  // TODO: Handle it?
+  // We fail to catch it so it will bubble through.
   val nextStep = new ProofStep(newGoals, None, None, tail)
   tail = tail match {
     case Some(tail) => {
@@ -223,11 +237,16 @@ def extend(ruleApp: RuleApplication, plugins: Plugins) {
   }
 }
 @
+@ The use of [[RuleApplications]] will be explained in more detail in \S\ref{sec:rules},
+for now just consider it instructions on how to extend the proof.
 
 Another common operation is to remove an element from the linked list.
 The easiest (special case) element to remove is the tail,
 so we give that a magic value of [[-1]].
 Otherwise there is more work involved.
+We provide [[pop]] to do this,
+where a bare call removes the last element
+and a given index removes that position.
 <<Remove a step of the proof>>=
 def pop(index: Int = -1) {
   if (index == -1) {
@@ -239,30 +258,45 @@ def pop(index: Int = -1) {
 }
 @
 @ The tail is simple to remove, mostly just some pointer updates.
+First, we handle the special case when the head and the tail match.
+In this case, they are either both [[None]],
+or they point to the same [[ProofStep]].
+Regardless, both will become [[None]] after the tail is removed.
 <<Remove the tail>>=
 if (tail == head) {
   tail = None
   head = None
 } else {
   tail = tail match {
-    case Some(t) => {
-      println("Removing tail which is distinct.")
-      val new_t = t.prev
-      t.prev = None
-      t.next = None
-      // Make sure to break next on new_t
-      new_t.get.next = None // Safe, as Head and tail were distinct
-      new_t
+    case Some(old_t) => {
+      <<Unlink old tail and form new tail>>
     }
     case None => None
   }
 }
 @
+@ When they are not the same,
+we follow the [[prev]] pointer back one step,
+and unlink all outgoing pointers from the old tail.
+The new tail still maintains a pointer to this old tail,
+so we need to break it.
+We can avoid being ``safe'' with the [[Option.get]] here
+because the new tail cannot be [[None]]---%
+if it were, then we were on the \emph{only} item,
+which would also have been the head and as such already handled.
+<<Unlink old tail and form new tail>>=
+val new_t = old_t.prev
+old_t.prev = None
+old_t.next = None
+new_t.get.next = None
+new_t.get.reason = None
+new_t
+@
 
-Removing arbitrary elements from a linked list is non-trivial.
+Removing arbitrary elements from a linked list is more involved.
 Because we are using a doubly-linked list,
 our job is made simpler by not needing to explicitly hold back references when traversing.
-Still, it is best done recursively.
+Traversal is best done recursively.
 <<Recursively find the element to remove>>=
 def stepOfInterest(step: ProofStep, index: Int): Option[ProofStep] = {
   if (index < 0) return None
@@ -278,13 +312,15 @@ def stepOfInterest(step: ProofStep, index: Int): Option[ProofStep] = {
 @ No part of this is difficult,
 it is simply the need for [[Option]] handling that adds noise.
 
-This leaves us free to define a the removal code as a simple set of pointer updates.
+Having an easy way to find an index
+leaves us free to define a the removal code as a simple set of pointer updates.
 <<Remove the node at the given index>>=
 <<Recursively find the element to remove>>
 head match {
   case Some(head) => stepOfInterest(head, index) match {
     case Some(step) => {
       step.prev.get.next = step.next
+      // The reason will need to change -- how can this work?
       step.next.get.prev = step.prev
       step.next = None
       step.prev = None
@@ -296,19 +332,19 @@ head match {
 @
 
 
-The [[Goal]]s that make up [[ProofStep]]s are themselves a very simple construct.
-It consists of a set of [[Formula]]e,
-and a set of variables as strings,
-and placeholders.
-Variables represent the variables shared over all formulae,
-i.e. the universally quantified variables of the goal.
+\subsection{Goals and formulae}
+The [[Goal]]s that make up [[ProofStep]]s are  a very simple construct.
+It consists of a rose tree (\S\ref{sec:rose-tree}) of [[Formula]]e,
+and a set of [[variables]] as strings
+representing the variables shared over all formulae,
+i.e., the universally quantified variables of the goal.
 <<models/Goal.scala>>=
 package remix.models
 
 <<Model imports>>
 
 class Goal(
-  val formulae: Set[Formula],
+  val formulae: RoseTree[Formula],
   val variables: Set[Variable])
 {
   <<Get the components by label>>
@@ -321,13 +357,12 @@ notangle -Rmodels/Goal.scala $< > main/scala/models/Goal.scala
 To make working with goals easier,
 we provide a way to index into them by formula label.
 <<Get the components by label>>=
-def apply(label: Label): Option[Formula] = {
-  for (formula <- formulae) {
-    if (label == formula.label) return Some(formula)
-  }
-  return None
-}
+def apply(label: Label): Option[Formula] = formulae.find{_.label == label}
 @
+@ While inefficient,
+a goal is unlikely to have in excess of a dozen labels.
+The limiting factor will be how many different pieces a human can understand,
+not what the system can handle.
 
 Because a Goal will need to be converted to and from JSON, we provided the necessary serializers and deserializers as well.
 <<models/Goal.scala>>=
@@ -336,7 +371,7 @@ object Goal
   implicit val GoalFormat: Format[Goal] = new Format[Goal] {
     def reads(json: JsValue): JsResult[Goal] = {
       return JsSuccess(new Goal(
-        json("formulae").as[Set[Formula]],
+        json("formulae").as[RoseTree[Formula]],
         json("variables").as[Set[Variable]]
       ))
     }
@@ -351,17 +386,49 @@ object Goal
 }
 @
 
-At this point it is important to make clear that a [[Goal]] is not some kind of Horn Clause.
-There is no assumed relationship between the formulae except what occurs through their embeddings.
-The top-level clause is simply the formula with no references to its label,
-as embeddings of placeholders must for a tree;
-the node in the tree with no parent is the root.
+It is worth spending some time on why this is what a goal is.
+Several different models were proposed:
+horn clause-like,
+sequent-like,
+and these trees of formulae.
+Each of these is a generalisation of the former.
+
+In the horn-clause like model,
+a goal is a set of antecedents and a single consequent.
+This matches well with how most theorem provers work:
+from a set of assumptions show a conclusion.
+Horn clauses are a limited subset of logic, however,
+so this is not a viable long term solution.
+In particular, if a plug-in is able to reason about statements
+(or perhaps produce them)
+that are not horn clause-like,
+then \ReMix{} would be unable to serialize them into a goal.
+
+In the sequent-like model,
+we have a much more general structure where instead of a single consequent,
+we have a disjunction of consequents.
+This removes the expressive limitations of a horn clause,
+and still maintains interoperability with horn clauses
+by allowing reasoners to maintain a single consequent if desired.
+However, it does mean we must maintain two different sets,
+and plug-ins must then work with either (or both) sides as appropriate.
+
+The final model is the tree of formulae.
+The tree structure represents the placeholder \emph{embedding} relation.
+That is, the root formula is not embedded in any other formula.
+All other formulae are embedded in exactly one other \emph{parent} formula.
+All formulae contain zero or more embedded \emph{child} formulae.
+In some way, the parent formula understands how the child formulae are embedded
+through their \emph{labels}.
+\ReMix{} does not care how the embedding actually occurs within the formula,
+just that a set of labels are maintained within a formula,
+and the rose tree does not disagree with the formula placeholders.
 
 A [[Formula]] is a statement in a language understood by at least one plug-in.
 \ReMix{} makes no effort to understand the content of the formulae,
 instead considering them as black boxes for the plug-ins to reason with.
 Instead, \ReMix{} works with formula metadata,
-including language, variables, and placeholders.
+including language, variables, and placeholder labels.
 At the formula level, a placeholder is just a string, the label used to identify a foreign formula.
 Note that for this reason, a formula also has a label so it too can be embedded as a placeholder.
 <<models/Formula.scala>>=
@@ -369,16 +436,13 @@ package remix.models
 
 <<Model imports>>
 
-class Formula(
+case class Formula(
   val label: Label,
   val data: JsValue,
   val language: LanguageID,
   val variables: Set[Variable],
   val placeholders: Set[Label]
 )
-{
-
-}
 @
 <<Makefile build entry>>=
 notangle -Rmodels/Formula.scala $< > main/scala/models/Formula.scala
@@ -386,13 +450,14 @@ notangle -Rmodels/Formula.scala $< > main/scala/models/Formula.scala
 @ The [[language]] is frequently used to constrain the plug-ins that can work with a given formula,
 while the variables are bubbled up to the [[Goal]]
 so that all the formulae can agree on the content of their statements.
-Placeholder strings are a subset of the [[Goal]]'s placeholder keys,
-otherwise there is a definition not specified.
+How the placeholders and variables are maintained through the formula tree structure
+is fairly simple.
+The set is the set of all used variables/placeholders,
+unioned with the sets of variables/placeholders from the child formulae.
 
 
 [[Formula]]e will be converted to and from JSON frequently,
 so like [[Goal]]s we provide converters.
-Because a Goal will need to be converted to and from JSON, we provided the necessary serializers and deserializers as well.
 <<models/Formula.scala>>=
 object Formula
 {
@@ -421,31 +486,153 @@ object Formula
 @
 
 
+\subsection{Rose trees}
+\label{sec:rose-tree}
+A rose tree is a very simple data structure
+of a tree with arbitrary branching factor at each node.
+The name comes from a rhododendron plant which has a similar appearance.
+Rose trees are defined as a value
+and a list of sub-trees.
+<<models/RoseTree.scala>>=
+package remix.models
+
+<<Model imports>>
+
+case class RoseTree[A](val value: A, val branches: Seq[RoseTree[A]])
+{
+  <<Map over the tree>>
+  <<Flatmap over the tree>>
+  <<Iterate through the tree>>
+  <<Find an element in the tree>>
+}
+@
+<<Makefile build entry>>=
+notangle -Rmodels/RoseTree.scala $< > main/scala/models/RoseTree.scala
+@
+
+One of the simplest operations to perform on a rose tree is [[map]].
+This is a simple recursive method:
+apply the function to the current value,
+and map it over each of the branches.
+<<Map over the tree>>=
+def map[B](f: A => B): RoseTree[B] = {
+  return RoseTree(
+    f(value),
+    branches.map{_.map(f)}
+  )
+}
+@
+
+Similar to a map,
+we can define a [[flatMap]]---%
+but for Rose trees there are two different [[flatMap]]s,
+a pre-order and post-order traversal.
+We define [[flatMap]] as a pre-order traversal,
+while [[flatMapR]] is a post-order traversal.
+<<Flatmap over the tree>>=
+def flatMap[B](f: A => B): Seq[B] = {
+  f(value) +: branches.flatMap{_.flatMap(f)}
+}
+def flatMapR[B](f: A => B): Seq[B] = {
+  branches.flatMap{_.flatMap(f)} :+ f(value)
+}
+@
+@ As a utility method, we also allow [[filter]] as a shortcut for [[flapMap(id).filter]].
+<<Flatmap over the tree>>=
+def filter(f: A => Boolean): Seq[A] = this.flatMap((x:A) => x).filter(f)
+@
+
+Walking through each element in a list is again doable in two orders,
+pre-order or post-order.
+We define [[foreach]] to walk pre-order,
+and [[foreachR]] to walk post-order.
+<<Iterate through the tree>>=
+def foreach(f: A => Unit): Unit = {this.flatMap(f);()}
+def foreachR(f: A => Unit): Unit = {this.flatMapR(f);()}
+@
+
+To search a rose tree for a value matching a given predicate,
+we check whether the root is the value we search for,
+or if any of the child trees (\emph{branches}) contain a value matching our predicate.
+This is a simple depth-first search.
+<<Find an element in the tree>>=
+def find(f: A => Boolean): Option[A] = {
+  if (f(value)) return Some(value)
+  else return branches.foldLeft(None: Option[A]){ (result: Option[A], next: RoseTree[A]) =>
+    result match {
+      case Some(value) => Some(value)
+      case None => next.find(f)
+    }
+  }
+}
+def find(needle: A): Option[A] = find((x) => needle == x)
+@
+@ The overloaded [[find]] method allows for finding by value to be the default comparison type.
+
+Lastly, as a matter of practicality,
+we provide a JSON formatter.
+<<models/RoseTree.scala>>=
+object RoseTree
+{
+  implicit def RoseTreeFormat[A: Format]: Format[RoseTree[A]] =
+  new Format[RoseTree[A]] {
+    def reads(json: JsValue): JsResult[RoseTree[A]] = {
+      return JsSuccess(new RoseTree(
+        json("value").as[A],
+        json("branches").as[Seq[RoseTree[A]]]
+      ))
+    }
+
+    def writes(rosetree: RoseTree[A]): JsValue = {
+      return Json.obj(
+        "value" -> Json.toJson(rosetree.value),
+        "branches" -> JsArray(rosetree.branches.map(Json.toJson(_)))
+      )
+    }
+  }
+}
+@
 
 \subsection{\ReMix{} rules}
-
-To link together [[ProofStep]]s,
+\label{sec:rules}
+To link together [[ProofStep]]s (\S\ref{sec:proofs}),
 we use [[RuleApplication]]s.
 A [[RuleApplication]] is a class which contains a [[Rule]],
 and specific instructions about how to apply it to the [[ProofStep]].
 A [[Rule]] is abstract, taking on several forms which we will discuss in more detail shortly.
+It must have some sort of name (e.g., ``Translate from English to Klingon''),
+and a plug-in ID for the plug-in that provides the rule.
 <<Rule trait>>=
 trait Rule
 {
   val name: String
   val provider: PluginID
-  def apply(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins): Future[Seq[Goal]]
-  def render(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins)
-  def dialog(goal: Goal, components: Set[Label], plugins: Plugins): Future[JsValue]
+  def apply(
+    goal: Goal,
+    components: Set[Label],
+    extraInfo: Option[JsValue],
+    plugins: Plugins): Future[Seq[Goal]]
+  def render(
+    goal: Goal,
+    components: Set[Label],
+    extraInfo: Option[JsValue],
+    plugins: Plugins): Future[JsValue]
+  def dialog(
+    goal: Goal,
+    components: Set[Label],
+    plugins: Plugins): Future[JsValue]
 }
 @
-@ A [[Rule]] can be applied, or it can be rendered.
+@ A [[Rule]] can be applied, it can be rendered, or it can request input (i.e., initiate a dialog).
 Application is self-explanatory: it takes a goal and produces some transformed goals.
-It may also take some extra information, often the result of a dialog box getting more information from a user.
-Rendering is often unnecessary, but it is useful for the tools to sometimes ``explain their working''.
-This provides them the opportunity to do so.
+It also takes the labels of the formulae it will work with.
+There may also be some extra information, often the result of requesting more information from a user.
+Rendering is often unnecessary, but it is useful for the tools to sometimes ``explain their working''
+so that \ReMix{} can show something to the user;
+this method provides the opportunity to do so.
+(More often, we simply show the updated goals.)
 Finally, there is a dialog method,
-which enables direct interaction between the plug-in and the user.
+which enables input from the user to the plug-in.
 
 To serialize and deserialize a [[Rule]] takes some work
 because it is a trait, not a class.
@@ -469,10 +656,12 @@ object Rule
 
     def writes(rule: Rule): JsValue = {
       return rule match {
-        case r: TranslationRule => (Json.toJson(r)(TranslationRule.TranslationRuleFormat).as[JsObject]
-                                    + ("rule-tag" -> JsString("translation")))
-        case r: ReasoningRule => (Json.toJson(r)(ReasoningRule.ReasoningRuleFormat).as[JsObject]
-                                  + ("rule-tag" -> JsString("reasoning")))
+        case r: TranslationRule =>
+          (Json.toJson(r)(TranslationRule.TranslationRuleFormat).as[JsObject]
+            + ("rule-tag" -> JsString("translation")))
+        case r: ReasoningRule =>
+          (Json.toJson(r)(ReasoningRule.ReasoningRuleFormat).as[JsObject]
+            + ("rule-tag" -> JsString("reasoning")))
       }
     }
   }
@@ -489,20 +678,25 @@ class RuleApplication(
   val extraInfo: Option[JsValue]
 )
 {
-  def apply(plugins: Plugins): Future[Seq[Goal]] = {
+  def apply(implicit plugins: Plugins): Future[Seq[Goal]] = {
     return rule.apply(goal, components, extraInfo, plugins)
   }
 
-  def render(plugins: Plugins) {
-    rule.render(goal, components, extraInfo, plugins)
+  def render(implicit plugins: Plugins): Future[JsValue] = {
+    return rule.render(goal, components, extraInfo, plugins)
   }
 
-  def dialog(plugins: Plugins): Future[JsValue] = {
+  def dialog(implicit plugins: Plugins): Future[JsValue] = {
     return rule.dialog(goal, components, plugins)
   }
 }
 @
 @ The methods themselves are just utility wrappers around the [[Rule]].
+The reason we have such a structure is essentially to ``freeze'' the arguments as they were.
+By doing this, we are able to reconstruct the proof without user intervention
+even if user intervention was necessary originally.
+Of course, there are limits to this
+(for example, the prior steps change too much so they cannot be applied.)
 
 As with most other model classes, it is worth defining a JSON formatter.
 <<RuleApplication class>>=
@@ -623,8 +817,8 @@ Future[Seq[Goal]] = {
 }
 @
 <<Render translation>>=
-def render(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins) {
-
+def render(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins): Future[JsValue] = {
+  return Future{JsNull}
 }
 @
 <<Describe a dialog to get a manual translation>>=
@@ -672,8 +866,8 @@ class ReasoningRule(
 
   <<Apply the reasoning rule>>
 
-  def render(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins) {
-
+  def render(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins): Future[JsValue] = {
+    return Future{JsNull}
   }
   def dialog(goal: Goal, components: Set[Label], plugins: Plugins): Future[JsValue] = {
     return Future{JsNull}
@@ -736,8 +930,10 @@ and insert it back where it came from in the goal.
 <<Re-insert the unused formulae into the new goal>>=
 return newFormulaeFuture.map { newFormulae =>
   newFormulae.map { newFormula =>
-    val updatedFormulae = ((goal.formulae.filter { f => !(components contains f.label)})
-                           + newFormula)
+    val updatedFormulae = goal.formulae.map { formula =>
+      if (formula.label == newFormula.label) newFormula
+      else formula
+    }
     new Goal(updatedFormulae, newFormula.variables union goal.variables)
   }
 }
@@ -1079,6 +1275,7 @@ def getProvidersForService(service: String): Future[Seq[Plugin]] =
 
 
 \subsection{Database}
+\label{sec:database}
 \ReMix{} is a useful tool to extend and edit proofs,
 but a foundational part of this is \emph{actually storing the proof}.
 To this end, there is a database made available in much the same way as the [[Plugins]] singleton.
@@ -1400,7 +1597,7 @@ forest.map { formulae =>
   val rule = new ReasoningRule(reasoner._1, plugin.id, reasoner._3)
   val labels = formulae.map{_.label}
   val automated = reasoner._2 == "automated"
-  new RuleApplication(rule, goal, labels, automated, None)
+  new RuleApplication(rule, goal, labels.toSet, automated, None)
 }
 @
 
@@ -1614,10 +1811,12 @@ package remix.controllers
 <<Controller imports>>
 
 @Singleton
-class ProofController @Inject()(cc: ControllerComponents, rmdb: ReMixDatabase, plugins: Plugins)
+class ProofController @Inject()(cc: ControllerComponents, rmdb: ReMixDatabase, pluginsInjection: Plugins)
     extends AbstractController(cc)
     with ProofActions
 {
+  implicit val plugins = pluginsInjection // Make suitable for implicit
+
   <<List all proofs>>
   <<Create a proof>>
   <<Delete a proof>>
@@ -1822,16 +2021,25 @@ the proof extension can continue.
 At this point, there is a valid [[RuleApplication]] object
 which we can use to call the proof's extension mechanism.
 <<Apply the rule to extend the proof>>=
-proof.extend(ruleApplication, plugins)
-save(proof,
-Future{ Ok(Json.obj(
-  <<success>>,
-  "proof" -> Json.toJson(proof)
-))}
-)
+try {
+  proof.extend(ruleApplication)
+  save(proof,
+    Future{ Ok(Json.obj(
+      <<success>>,
+      "proof" -> Json.toJson(proof)
+    ))}
+  )
+} catch {
+  case e: PluginError => Future{ Ok(Json.obj(
+    <<failure>>,
+    "reason" -> e.getMessage
+  ))}
+}
 @
+@ There is always a chance that the rule will not be successfully applied.
+In this case, we have to catch the [[PluginError]] and report the problem.
 
-The oppose of extending a proof is to contract a proof.
+The opposite of extending a proof is to contract a proof.
 This should happen only at the tail, but we do allow it at any point for convenience.
 It is only recommended to work at the end of a proof.
 <<Remove a step from the proof>>=
@@ -1912,7 +2120,7 @@ makefile: ReMix.scala-nw
 @
 
 
-\section{Allowing access via any URL}
+\section{Custom configuration}
 The following is dangerous, but useful.
 <<resources/application.conf>>=
 play.http.session.cookieName="REMIX_SESSION"
@@ -1928,16 +2136,7 @@ notangle -Rresources/application.conf $< > main/resources/application.conf
 @
 
 
-\section{Miscellaneous definitions}
-
-<<Controller imports>>=
-import javax.inject._
-import play.api._
-import play.api.mvc._
-import play.api.libs.json._
-
-import remix.models._
-@
+\section{Package imports}
 
 <<Model imports>>=
 import scala.io._
@@ -2018,11 +2217,9 @@ trait ProofActions extends Results
   )(block:(Proof, (Proof, Future[Result]) => Future[Result])=> Action[AnyContent]) = {
     rmdb.readProofJSON(proofID) match {
       case Some(proofJson) => {
-        println("Read in proof from database")
         val proof = proofJson.as[Proof]
         def saver(proof: Proof, futRes: Future[Result]) = {
           val proofJSON = Json.toJson(proof)
-          println("Saving proof to database.")
           val saved = rmdb.updateProof(proofID, proofJSON)
           saved match {
             case true => futRes
