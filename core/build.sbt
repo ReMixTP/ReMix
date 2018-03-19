@@ -2,6 +2,8 @@ name := "remix-core"
 version := "0.1.0"
 scalaVersion := "2.12.4"
 
+scalacOptions ++= Seq("-unchecked", "-deprecation", "-feature")
+
 lazy val root = (project in file(".")).enablePlugins(PlayScala)
 disablePlugins(PlayLayoutPlugin)
 

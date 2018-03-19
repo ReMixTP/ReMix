@@ -1,3 +1,4 @@
+% -*- mode: latex; mode: mmm; mmm-noweb-code-mode: scala-mode; -*-
 \documentclass[10pt,a4paper]{article}
 \usepackage{noweb}
 \usepackage[T1]{fontenc}
@@ -51,6 +52,7 @@
 \maketitle
 
 \begin{abstract}
+  \noindent
   Heterogeneous reasoning is the next step in assisted and automated theorem proving.
   By working alongside the user,
   explaining the steps more clearly
@@ -66,6 +68,9 @@
 \begin{keyword}
   Heterogeneous reasoning\sep automated theorem proving\sep representations\sep interactive theorem proving\sep diagrammatic reasoning
 \end{keyword}
+
+\tableofcontents{}
+\clearpage{}
 
 \section{Introduction}
 \ReMix{} is a heterogeneous reasoning web app
@@ -106,7 +111,7 @@ package remix.models
 class Proof(val name: String, startingGoals: Seq[Goal])
 {
   var head: Option[ProofStep] = Some(ProofStep(startingGoals, None, None, None))
-  var tail: Option[ProofStep] = head;
+  var tail: Option[ProofStep] = head
 
   def this(name: String) {
     this(name, Nil)
@@ -127,7 +132,7 @@ case class ProofStep(
 )
 @
 <<Makefile build entry>>=
-notangle -Rmodels/Proof.scala $< > main/scala/models/Proof.scala
+notangle -Rmodels/Proof.scala $< > main/scala/remix/models/Proof.scala
 @
 @ Why a linked list and not a tree?
 Because a linked list is simpler but still sufficient.
@@ -152,11 +157,11 @@ object Proof
       val proof = new Proof(proofName)
       proof.head = proofHead
       <<Read prev links from JSON>>
-      return JsSuccess(proof)
+      JsSuccess(proof)
     }
 
     def writes(proof: Proof): JsValue = {
-      return Json.obj(
+      Json.obj(
         "name" -> proof.name,
         "steps" -> Json.toJson(proof.head)
       )
@@ -171,7 +176,7 @@ object ProofStep
 {
   implicit val ProofStepFormat: Format[ProofStep] = new Format[ProofStep] {
     def reads(json: JsValue): JsResult[ProofStep] = {
-      return JsSuccess(new ProofStep(
+      JsSuccess(new ProofStep(
         json("goals").as[Seq[Goal]],
         json("next").as[Option[ProofStep]],
         json("reason").as[Option[RuleApplication]],
@@ -180,7 +185,7 @@ object ProofStep
     }
 
     def writes(proofStep: ProofStep): JsValue = {
-      return Json.obj(
+      Json.obj(
         "goals" -> Json.toJson(proofStep.goals),
         "next" -> Json.toJson(proofStep.next),
         "reason" -> Json.toJson(proofStep.reason)
@@ -198,14 +203,14 @@ We insert these after-the-fact by walking the linked list and manually inserting
 <<Read prev links from JSON>>=
 var ptr: Option[ProofStep] = proof.head
 var prev: Option[ProofStep] = None
-while (ptr != None) {
+while (ptr.isDefined) {
   ptr match {
     case Some(p) => p.prev = prev
     case None => None
   }
   prev = ptr
   ptr = ptr match {
-    case Some(ptr) => ptr.next
+    case Some(pptr) => pptr.next
     case None => throw new Exception // This should never happen.
   }
 }
@@ -228,11 +233,10 @@ def extend(ruleApp: RuleApplication)(implicit plugins: Plugins) {
   // We fail to catch it so it will bubble through.
   val nextStep = new ProofStep(newGoals, None, None, tail)
   tail = tail match {
-    case Some(tail) => {
-      tail.next = Some(nextStep)
-      tail.reason = Some(ruleApp)
-      tail.next
-    }
+    case Some(ttail) =>
+      ttail.next = Some(nextStep)
+      ttail.reason = Some(ruleApp)
+      ttail.next
     case None => None // If the tail was None, the head was none, how did we get here?
   }
 }
@@ -268,9 +272,8 @@ if (tail == head) {
   head = None
 } else {
   tail = tail match {
-    case Some(old_t) => {
+    case Some(old_t) =>
       <<Unlink old tail and form new tail>>
-    }
     case None => None
   }
 }
@@ -299,12 +302,12 @@ our job is made simpler by not needing to explicitly hold back references when t
 Traversal is best done recursively.
 <<Recursively find the element to remove>>=
 def stepOfInterest(step: ProofStep, index: Int): Option[ProofStep] = {
-  if (index < 0) return None
-  else if (index == 0) return Some(step)
+  if (index < 0) None
+  else if (index == 0) Some(step)
   else {
     step.next match {
-      case Some(step) => return stepOfInterest(step, index-1)
-      case None => return None
+      case Some(nextStep) => stepOfInterest(nextStep, index-1)
+      case None => None
     }
   }
 }
@@ -317,14 +320,13 @@ leaves us free to define a the removal code as a simple set of pointer updates.
 <<Remove the node at the given index>>=
 <<Recursively find the element to remove>>
 head match {
-  case Some(head) => stepOfInterest(head, index) match {
-    case Some(step) => {
+  case Some(validHead) => stepOfInterest(validHead, index) match {
+    case Some(step) =>
       step.prev.get.next = step.next
       // The reason will need to change -- how can this work?
       step.next.get.prev = step.prev
       step.next = None
       step.prev = None
-    }
     case None => None
   }
   case None => None
@@ -351,7 +353,7 @@ class Goal(
 }
 @
 <<Makefile build entry>>=
-notangle -Rmodels/Goal.scala $< > main/scala/models/Goal.scala
+notangle -Rmodels/Goal.scala $< > main/scala/remix/models/Goal.scala
 @
 
 To make working with goals easier,
@@ -370,14 +372,14 @@ object Goal
 {
   implicit val GoalFormat: Format[Goal] = new Format[Goal] {
     def reads(json: JsValue): JsResult[Goal] = {
-      return JsSuccess(new Goal(
+      JsSuccess(new Goal(
         json("formulae").as[RoseTree[Formula]],
         json("variables").as[Set[Variable]]
       ))
     }
 
     def writes(goal: Goal): JsValue = {
-      return Json.obj(
+      Json.obj(
         "formulae" -> Json.toJson(goal.formulae),
         "variables" -> Json.toJson(goal.variables)
       )
@@ -437,15 +439,15 @@ package remix.models
 <<Model imports>>
 
 case class Formula(
-  val label: Label,
-  val data: JsValue,
-  val language: LanguageID,
-  val variables: Set[Variable],
-  val placeholders: Set[Label]
+  label: Label,
+  data: JsValue,
+  language: LanguageID,
+  variables: Set[Variable],
+  placeholders: Set[Label]
 )
 @
 <<Makefile build entry>>=
-notangle -Rmodels/Formula.scala $< > main/scala/models/Formula.scala
+notangle -Rmodels/Formula.scala $< > main/scala/remix/models/Formula.scala
 @
 @ The [[language]] is frequently used to constrain the plug-ins that can work with a given formula,
 while the variables are bubbled up to the [[Goal]]
@@ -463,7 +465,7 @@ object Formula
 {
   implicit val FormulaFormat: Format[Formula] = new Format[Formula] {
     def reads(json: JsValue): JsResult[Formula] = {
-      return JsSuccess(new Formula(
+      JsSuccess(new Formula(
         json("label").as[Label],
         json("data"),
         json("language").as[LanguageID],
@@ -473,7 +475,7 @@ object Formula
     }
 
     def writes(formula: Formula): JsValue = {
-      return Json.obj(
+      Json.obj(
         "label" -> formula.label,
         "data" -> formula.data,
         "language" -> Json.toJson(formula.language),
@@ -498,7 +500,7 @@ package remix.models
 
 <<Model imports>>
 
-case class RoseTree[A](val value: A, val branches: Seq[RoseTree[A]])
+case class RoseTree[A](value: A, branches: Seq[RoseTree[A]])
 {
   <<Map over the tree>>
   <<Flatmap over the tree>>
@@ -507,7 +509,7 @@ case class RoseTree[A](val value: A, val branches: Seq[RoseTree[A]])
 }
 @
 <<Makefile build entry>>=
-notangle -Rmodels/RoseTree.scala $< > main/scala/models/RoseTree.scala
+notangle -Rmodels/RoseTree.scala $< > main/scala/remix/models/RoseTree.scala
 @
 
 One of the simplest operations to perform on a rose tree is [[map]].
@@ -516,7 +518,7 @@ apply the function to the current value,
 and map it over each of the branches.
 <<Map over the tree>>=
 def map[B](f: A => B): RoseTree[B] = {
-  return RoseTree(
+  RoseTree(
     f(value),
     branches.map{_.map(f)}
   )
@@ -557,10 +559,10 @@ or if any of the child trees (\emph{branches}) contain a value matching our pred
 This is a simple depth-first search.
 <<Find an element in the tree>>=
 def find(f: A => Boolean): Option[A] = {
-  if (f(value)) return Some(value)
-  else return branches.foldLeft(None: Option[A]){ (result: Option[A], next: RoseTree[A]) =>
+  if (f(value)) Some(value)
+  else branches.foldLeft(None: Option[A]){ (result: Option[A], next: RoseTree[A]) =>
     result match {
-      case Some(value) => Some(value)
+      case Some(v) => Some(v)
       case None => next.find(f)
     }
   }
@@ -577,14 +579,14 @@ object RoseTree
   implicit def RoseTreeFormat[A: Format]: Format[RoseTree[A]] =
   new Format[RoseTree[A]] {
     def reads(json: JsValue): JsResult[RoseTree[A]] = {
-      return JsSuccess(new RoseTree(
+      JsSuccess(new RoseTree(
         json("value").as[A],
         json("branches").as[Seq[RoseTree[A]]]
       ))
     }
 
     def writes(rosetree: RoseTree[A]): JsValue = {
-      return Json.obj(
+      Json.obj(
         "value" -> Json.toJson(rosetree.value),
         "branches" -> JsArray(rosetree.branches.map(Json.toJson(_)))
       )
@@ -648,14 +650,14 @@ object Rule
 {
   implicit val RuleFormat: Format[Rule] = new Format[Rule] {
     def reads(json: JsValue): JsResult[Rule] = {
-      return JsSuccess(json("rule-tag").as[String] match {
+      JsSuccess(json("rule-tag").as[String] match {
         case "translation" => json.as[TranslationRule]
         case "reasoning" => json.as[ReasoningRule]
       })
     }
 
     def writes(rule: Rule): JsValue = {
-      return rule match {
+      rule match {
         case r: TranslationRule =>
           (Json.toJson(r)(TranslationRule.TranslationRuleFormat).as[JsObject]
             + ("rule-tag" -> JsString("translation")))
@@ -679,15 +681,15 @@ class RuleApplication(
 )
 {
   def apply(implicit plugins: Plugins): Future[Seq[Goal]] = {
-    return rule.apply(goal, components, extraInfo, plugins)
+    rule.apply(goal, components, extraInfo, plugins)
   }
 
   def render(implicit plugins: Plugins): Future[JsValue] = {
-    return rule.render(goal, components, extraInfo, plugins)
+    rule.render(goal, components, extraInfo, plugins)
   }
 
   def dialog(implicit plugins: Plugins): Future[JsValue] = {
-    return rule.dialog(goal, components, plugins)
+    rule.dialog(goal, components, plugins)
   }
 }
 @
@@ -705,7 +707,7 @@ object RuleApplication
   implicit val RuleApplicationFormat: Format[RuleApplication] =
   new Format[RuleApplication] {
     def reads(json: JsValue): JsResult[RuleApplication] = {
-      return JsSuccess(new RuleApplication(
+      JsSuccess(new RuleApplication(
         json("rule").as[Rule],
         json("goal").as[Goal],
         json("components").as[Set[Label]],
@@ -715,7 +717,7 @@ object RuleApplication
     }
 
     def writes(ruleApp: RuleApplication): JsValue = {
-      return Json.obj(
+      Json.obj(
         "rule" -> Json.toJson(ruleApp.rule),
         "goal" -> Json.toJson(ruleApp.goal),
         "components" -> Json.toJson(ruleApp.components),
@@ -742,7 +744,7 @@ package remix.models
 <<RuleApplication class>>
 @
 <<Makefile build entry>>=
-notangle -Rmodels/Rule.scala $< > main/scala/models/Rule.scala
+notangle -Rmodels/Rule.scala $< > main/scala/remix/models/Rule.scala
 @
 
 Despite the apparent complexity, \ReMix{} relies on exactly four rules:
@@ -768,7 +770,7 @@ class TranslationRule(
   val provider: PluginID
 ) extends Rule
 {
-  val name = s"Translation from ${fromLanguage} to ${toLanguage}"
+  val name = s"Translation from $fromLanguage to $toLanguage"
 
   <<Apply translation>>
   <<Render translation>>
@@ -788,10 +790,10 @@ and create a new goal with the correct substitution.
 def apply(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins):
 Future[Seq[Goal]] = {
   if (components.size != 1)
-    return Future{Array(goal)}
+    Future{Array(goal)}
   else {
     val formulaOpt = goal(components.head)
-    if (formulaOpt == None) {
+    if (formulaOpt.isEmpty) {
       return Future{Array(goal)}
     }
     val formula = formulaOpt.get
@@ -806,7 +808,7 @@ Future[Seq[Goal]] = {
         })
       )
     )}.map { json => json.as[Formula] }
-    return newFormulaFuture.map { formula => {
+    newFormulaFuture.map { formula => {
       val newFormulae = goal.formulae.map { oldFormula =>
         if (oldFormula.label == formula.label) formula
         else oldFormula
@@ -818,12 +820,12 @@ Future[Seq[Goal]] = {
 @
 <<Render translation>>=
 def render(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins): Future[JsValue] = {
-  return Future{JsNull}
+  Future{JsNull}
 }
 @
 <<Describe a dialog to get a manual translation>>=
 def dialog(goal: Goal, components: Set[Label], plugins: Plugins): Future[JsValue] = {
-  return Future{JsNull}
+  Future{JsNull}
 }
 @
 <<Serialize a translation rule>>=
@@ -831,7 +833,7 @@ object TranslationRule
 {
   implicit val TranslationRuleFormat: Format[TranslationRule] = new Format[TranslationRule] {
     def reads(json: JsValue): JsResult[TranslationRule] = {
-      return JsSuccess(new TranslationRule(
+      JsSuccess(new TranslationRule(
         json("fromLanguage").as[LanguageID],
         json("toLanguage").as[LanguageID],
         json("provider").as[PluginID]
@@ -839,7 +841,7 @@ object TranslationRule
     }
 
     def writes(transRule: TranslationRule): JsValue = {
-      return Json.obj(
+      Json.obj(
         "fromLanuage" -> Json.toJson(transRule.fromLanguage),
         "toLanguage" -> Json.toJson(transRule.toLanguage),
         "provider" -> Json.toJson(transRule.provider)
@@ -867,10 +869,10 @@ class ReasoningRule(
   <<Apply the reasoning rule>>
 
   def render(goal: Goal, components: Set[Label], extraInfo: Option[JsValue], plugins: Plugins): Future[JsValue] = {
-    return Future{JsNull}
+    Future{JsNull}
   }
   def dialog(goal: Goal, components: Set[Label], plugins: Plugins): Future[JsValue] = {
-    return Future{JsNull}
+    Future{JsNull}
   }
 }
 <<Serialize a reasoning rule>>
@@ -928,7 +930,7 @@ the formula is ideally a stand-alone goal.
 Finally, we must take the new formulae
 and insert it back where it came from in the goal.
 <<Re-insert the unused formulae into the new goal>>=
-return newFormulaeFuture.map { newFormulae =>
+newFormulaeFuture.map { newFormulae =>
   newFormulae.map { newFormula =>
     val updatedFormulae = goal.formulae.map { formula =>
       if (formula.label == newFormula.label) newFormula
@@ -945,7 +947,7 @@ object ReasoningRule
 {
   implicit val ReasoningRuleFormat: Format[ReasoningRule] = new Format[ReasoningRule] {
     def reads(json: JsValue): JsResult[ReasoningRule] = {
-      return JsSuccess(new ReasoningRule(
+      JsSuccess(new ReasoningRule(
         json("language").as[LanguageID],
         json("provider").as[PluginID],
         json("identifier").as[String]
@@ -953,7 +955,7 @@ object ReasoningRule
     }
 
     def writes(rule: ReasoningRule): JsValue = {
-      return Json.obj(
+      Json.obj(
         "language" -> Json.toJson(rule.language),
         "provider" -> Json.toJson(rule.provider),
         "identifier" -> Json.toJson(rule.identifier)
@@ -990,15 +992,15 @@ package remix.models
 
 <<Model imports>>
 
-class Plugin (
-  val id: PluginID,
-  val name: String,
-  val website: String,
-  val version: String,
-  val description: String,
-  val icon: String,
-  val base: String,
-  val provides: Map[String, String]
+case class Plugin (
+  id: PluginID,
+  name: String,
+  website: String,
+  version: String,
+  description: String,
+  icon: String,
+  base: String,
+  provides: Map[String, String]
 )
 {
   <<Send a query to the plug-in>>
@@ -1011,7 +1013,7 @@ object Plugin
 }
 @
 <<Makefile build entry>>=
-notangle -Rmodels/Plugin.scala $< > main/scala/models/Plugin.scala
+notangle -Rmodels/Plugin.scala $< > main/scala/remix/models/Plugin.scala
 @
 @ Two useful utilities are included: JSON serialisation and deserialisation.
 The deserialisation is most useful, as it allows us to take the output of a request to the plug-in server
@@ -1019,7 +1021,7 @@ and produce a plug-in object with minimal fuss.
 <<Read JSON to become a Plugin>>=
 implicit val PluginReads: Reads[Plugin] = new Reads[Plugin] {
   def reads(json: JsValue): JsResult[Plugin] = {
-    return JsSuccess(new Plugin(
+    JsSuccess(new Plugin(
       json("id").as[PluginID],
       json("name").as[String],
       json("website").as[String],
@@ -1036,7 +1038,7 @@ implicit val PluginReads: Reads[Plugin] = new Reads[Plugin] {
 <<Write a Plugin to JSON>>=
 implicit val PluginWrites: Writes[Plugin] = new Writes[Plugin] {
   def writes(p: Plugin): JsValue = {
-    return Json.obj(
+    Json.obj(
       "id" -> p.id,
       "name" -> p.name,
       "website" -> p.website,
@@ -1055,7 +1057,7 @@ so that the rest of the system can follow the known REST API structure
 and simply pass the information through.
 <<Send a query to the plug-in>>=
 private def joinURL(first: String, second: String): String = {
-  return if (second == "") {
+  if (second == "") {
     first
   } else if (!first.endsWith("/") && !second.startsWith("/")) {
     first + "/" + second
@@ -1075,9 +1077,9 @@ def query(
   val fullURL = joinURL(base,
                   joinURL(provides(service), endpoint))
   if (postData == JsNull) {
-    return PluginClient.GET(fullURL)
+    PluginClient.GET(fullURL)
   } else {
-    return PluginClient.POST(fullURL, postData)
+    PluginClient.POST(fullURL, postData)
   }
 }
 @
@@ -1093,16 +1095,16 @@ package remix.clients
 
 object PluginClient
 {
-  implicit val system = ActorSystem()
-  implicit val materializer = ActorMaterializer()
-  val ws = AhcWSClient()
+  implicit val system: ActorSystem = ActorSystem()
+  implicit val materializer: ActorMaterializer = ActorMaterializer()
+  val ws: AhcWSClient = AhcWSClient()
 
   <<Send a GET request>>
   <<Send a POST request>>
 }
 @
 <<Makefile build entry>>=
-notangle -Rclients/PluginClient.scala $< > main/scala/clients/PluginClient.scala
+notangle -Rclients/PluginClient.scala $< > main/scala/remix/clients/PluginClient.scala
 @
 @ The Play framework makes this relatively straightforward.
 First, a [[GET]] request.
@@ -1114,7 +1116,7 @@ def GET(url: String): Future[JsValue] = {
     .withHttpHeaders("Cache-Control" -> "no-cache")
     .withRequestTimeout(60.seconds)
     .get()
-  return response.map {
+  response.map {
     r => {r.json}
   } .recover {
     case t: java.net.ConnectException => JsArray()
@@ -1131,7 +1133,7 @@ def POST(url: String, data: JsValue): Future[JsValue] = {
     .withHttpHeaders("Cache-Control" -> "no-cache")
     .withRequestTimeout(60.seconds)
     .post(data)
-  return response.map {
+  response.map {
     r => {r.json}
   } .recover {
     case t: java.net.ConnectException => JsArray()
@@ -1163,7 +1165,7 @@ class Plugins
 <<Load Plugins eagerly>>
 @
 <<Makefile build entry>>=
-notangle -Rmodels/Plugins.scala $< > main/scala/models/Plugins.scala
+notangle -Rmodels/Plugins.scala $< > main/scala/remix/models/Plugins.scala
 @
 @ One minor niggle is that the [[Plugins]] singleton is not loaded at start-up,
 but lazily upon first request.
@@ -1184,8 +1186,10 @@ we will read a file called [[/etc/remix.cfg]].
 This should be sufficient, until a proper ``App Store'' of plug-ins exists.
 <<Load a list of all the plug-in sources>>=
 private def loadListOfPluginSources(): Seq[String] = {
-  val configFile = Source.fromFile("/etc/remix.cfg")
-  return configFile.getLines.toSeq
+  Source
+    .fromFile("/etc/remix.cfg")
+    .getLines
+    .toSeq
 }
 @
 
@@ -1196,40 +1200,39 @@ This is surprisingly complicated, due to the way the Play framework functions.
 <<Load a single plug-in from a URL>>
 
 private def pluginMapFromSeq(plugins: Seq[Plugin]): Map[PluginID, Plugin] = {
-  return plugins.map {
-    (p) => (p.id -> p)
+  plugins.map {
+    (p) => p.id -> p
   }.toMap
 }
 
 def loadAllPlugins(urls: Seq[String]): Future[Map[PluginID,Plugin]] = {
   val emptyMap : Future[Map[PluginID,Plugin]] = Future{Map()}
-  val f: Future[Map[PluginID,Plugin]] = pluginsSources.foldLeft (emptyMap) ({
+  val f: Future[Map[PluginID,Plugin]] = urls.foldLeft (emptyMap) ({
     (pluginMapFuture, url) => {
       val newMapExtensionFuture = loadPluginFromSource(url).map(pluginMapFromSeq)
       for {
         currentMap <- pluginMapFuture
         extensionMap <- newMapExtensionFuture
-      } yield (currentMap ++ extensionMap)
+      } yield currentMap ++ extensionMap
     }
   })
   f onComplete {
     case Success(m) => m
     case Failure(t) => println(t.getMessage)
   }
-  return f
+  f
 }
 @
 @ To simplify the procedure, we have a helper function which loads all the plug-ins from a single URL.\@
 <<Load a single plug-in from a URL>>=
 def loadPluginFromSource(url: String): Future[Seq[Plugin]] = {
-  val pluginJsonFuture = PluginClient.GET(url)
-  return pluginJsonFuture.map{
-    (pluginJson) => {
-      pluginJson.as[Array[JsValue]].map {
-        pluginJS => pluginJS("plugin").as[Plugin]
+  PluginClient
+    .GET(url)
+    .map {
+      _.as[Array[JsValue]].map {
+        _.as[Plugin]
       }
     }
-  }
 }
 @
 
@@ -1304,7 +1307,7 @@ class ReMixDatabase @Inject()(db: Database)
 <<Load the database eagerly>>
 @
 <<Makefile build entry>>=
-notangle -Rmodels/ReMixDatabase.scala $< > main/scala/models/ReMixDatabase.scala
+notangle -Rmodels/ReMixDatabase.scala $< > main/scala/remix/models/ReMixDatabase.scala
 @
 @ Like the [[Plugins]] object, it would be best to load this eagerly.
 <<Load the database eagerly>>=
@@ -1328,9 +1331,9 @@ def getAllProofIDs(): Seq[Int] = {
     val allIDs = new ListBuffer[Int]()
     while (rs.next())
       allIDs += rs.getInt("file_id")
-    return allIDs.toSeq
+    allIDs.toSeq
   } catch {
-    case e: Throwable => return Nil
+    case e: Throwable => Nil
   } finally {
     connection.close()
   }
@@ -1349,11 +1352,11 @@ def createProof(proofName: String, proofJson: JsValue): Option[Int] = {
     statement.setString(1, proofName)
     statement.setString(2, proofJson.toString)
     statement.executeUpdate()
-    val rs = statement.getGeneratedKeys();
-    if (rs.next) return Some(rs.getInt(1))
-    else return None
+    val rs = statement.getGeneratedKeys()
+    if (rs.next) Some(rs.getInt(1))
+    else None
   } catch {
-    case e: Throwable => {println(e.toString); return None}
+    case e: Throwable => println(e.toString); None
   } finally {
     connection.close()
   }
@@ -1370,10 +1373,10 @@ def readProofJSON(proofID: Int): Option[JsValue] = {
     )
     statement.setInt(1, proofID)
     val rs = statement.executeQuery()
-    if (rs.next) return Some(Json.parse(rs.getString(1)))
-    else return None
+    if (rs.next) Some(Json.parse(rs.getString(1)))
+    else None
   } catch {
-    case e: Throwable => {println(e.toString); return None}
+    case e: Throwable => println(e.toString); None
   } finally {
     connection.close()
   }
@@ -1391,9 +1394,9 @@ def updateProof(proofID: Int, proofJson: JsValue): Boolean = {
     statement.setString(1, proofJson.toString.replace("\n", " "))
     statement.setInt(2, proofID)
     statement.executeUpdate()
-    return true
+    true
   } catch {
-    case e: Throwable => {println(e.toString); return false}
+    case e: Throwable => println(e.toString); false
   } finally {
     connection.close()
   }
@@ -1411,9 +1414,9 @@ def deleteProof(proofID: Int): Boolean = {
     )
     statement.setInt(1, proofID)
     statement.executeUpdate()
-    return true
+    true
   } catch {
-    case e: Throwable => {println(e.toString); return false}
+    case e: Throwable => println(e.toString); false
   } finally {
     connection.close()
   }
@@ -1442,71 +1445,83 @@ Given there are four types of rule, we break the problem down into four sub-prob
 <<Find the rules which could be applied>>=
 def findRules(plugins: Plugins): Future[Seq[RuleApplication]] = {
   for {
-    transrules <- possibleTranslationRules(plugins);
-    reasonrules <- possibleReasoningRules(plugins);
-    extractrules <- possibleExtractionRules(plugins);
+    transrules <- possibleTranslationRules(plugins)
+    reasonrules <- possibleReasoningRules(plugins)
+    extractrules <- possibleExtractionRules(plugins)
     subrules <- possibleSubstitutionRules(plugins)
-  } yield (
-    transrules ++ reasonrules ++
-    extractrules ++ subrules
-  )
+  } yield transrules ++ reasonrules ++ extractrules ++ subrules
 }
+
+<<Find the available rules in a generic way>>
 <<Find the available translation rules>>
 <<Find the available reasoning rules>>
 <<Find the available extraction rules>>
 <<Find the available substitution rules>>
 @
-@ Each of these we tackle in turn below.
+@ Each of these we tackle in turn below,
+but first we define the general structure of what it means to find some rules.
 
-\subsection{Finding translation rules}
-A translation rules is relatively simple.
-It maps a formula from the source language to the target language,
-so long as a plug-in exists to perform this translation.
-Each plug-in is queried for the translations it can make,
-and any that match the source formula are retrieved.
-<<Find the available translation rules>>=
-def possibleTranslationRules(plugins: Plugins): Future[Seq[RuleApplication]] = {
-  plugins.getProvidersForService("translate").flatMap {
+The flow of finding rules is relatively generic:
+query the plug-ins object for the relevant providers,
+then call each plug-in to get the appropriate rules.
+We curry the function to make use of Scala's excellent ``trailing block'' syntax.
+<<Find the available rules in a generic way>>=
+def possibleRules[A](
+  plugins: Plugins,
+  service: String,
+  parser: JsValue => Seq[A]
+)(ruleBuilder: (A, Goal, PluginID) => Seq[RuleApplication]): Future[Seq[RuleApplication]] = {
+  plugins.getProvidersForService(service).flatMap {
     s => s.foldLeft(Future{Seq[RuleApplication]()}) {
       (seq, plugin) =>
       for {
-        current <- seq;
+        current <- seq
         next <- {
-          <<Determine if a plug-in can translate from one of the goal formulae>>
+          plugin.query(service, "").map(parser).map{ rules =>
+            <<Build the [[RuleApplication]]s and keep those appropriate>>
+          }
         }
-      } yield (current ++ next)
+      } yield current ++ next
     }
   }
 }
 @
 
-To actually work out whether the plug-in can perform the required operation,
-we must query the endpoint [[<translate>]],
-e.g. [[my-plugin-site.com/api/translations]].
-Because there are possibly multiple languages in the goal right now,
-we check if the plug-in can translate any of the formulae it contains.
-We expect the result to be in a [[translations]] key,
-as a list of lists where the inner list is [[[``sourcelang'', ``targetlang'', ``automatic'']]].
-Because a ``list-of-lists'' is cumbersome,
-we interpret these inner lists as a triple.
-<<Determine if a plug-in can translate from one of the goal formulae>>=
-val translationsFuture: Future[Seq[(LanguageID, LanguageID, String)]] =
-  plugin.query("translate", "").map{
-    _("translations").as[Seq[(LanguageID, LanguageID, String)]]
+Once we have the rules from the plug-in,
+we need to convert them to [[RuleApplication]]s,
+keeping those that are relevant but discarding the rest.
+For this, we need to inspect the current tail of the proof.
+<<Build the [[RuleApplication]]s and keep those appropriate>>=
+tail match {
+  case Some(foundTail) => foundTail.goals.flatMap{ goal =>
+    rules.flatMap{ ruleBuilder(_, goal, plugin.id) }
   }
-translationsFuture.map { s => s.flatMap{
-  translation => {
-    tail match {
-      case Some(tail) => tail.goals.flatMap { goal =>
-        <<Does the current translation work with the current goal?>>
-      }
-      case None => Nil
-    }
-  }
-}}
+  case None => Nil
+}
 @
-@ The specifics of checking whether a goal can benefit from a translation
-is not too difficult.
+@ All that remains is to actually supply the [[parser]] and [[ruleBuilder]].
+
+\subsection{Finding translation rules}
+A translation rules is relatively simple.
+It maps a formula from the source language to the target language,
+so long as a plug-in exists to perform this translation.
+Using the [[possibleRules]] method,
+we supply simply the ``key'' we are working with, in this case [["translate"]],
+the parser to the intermediate tuple-representation,
+and the function to transform the intermediate representation, a goal, and a plug-in identifier
+into a sequence of [[RuleApplication]]s.
+<<Find the available translation rules>>=
+def possibleTranslationRules(plugins: Plugins): Future[Seq[RuleApplication]] = possibleRules(
+  plugins,
+  "translate",
+  (jsResponse: JsValue) => jsResponse("translations").as[Seq[(LanguageID, LanguageID, String)]],
+) { (translation: (LanguageID, LanguageID, String), goal: Goal, pluginID: PluginID) =>
+  <<Does the current translation work with the current goal?>>
+}
+@
+
+The specifics of checking whether a goal can benefit from a translation
+are not too difficult.
 If there is a formula with the language this translation starts at,
 then we could use it.
 Otherwise, this translation is useless with this goal.
@@ -1517,7 +1532,7 @@ for (formula <- goal.formulae) {
     val rule = new TranslationRule(
       translation._1,
       translation._2,
-      plugin.id
+      pluginID
     )
     val automated = translation._3 == "automated"
     ruleApps += new RuleApplication(rule, goal, Set(formula.label),
@@ -1532,7 +1547,7 @@ ruleApps
 In contrast to a translation rule,
 a reasoning rule is very complicated.
 Because a plug-in can reason in a single language,
-we must careful extract goal parts that are in a single language.
+we must carefully extract goal parts that are in a single language.
 The difficulty with this is that
 the goal placeholder tree might have formulae in the desired language
 scattered throughout it.
@@ -1541,44 +1556,17 @@ or else they might form a forest.
 We need to first compute this forest,
 and from then generate the collections of labels each rule will use.
 
-First, we cycle through all the plug-ins.
+We set up reasoning rules again using the [[possibleRules]] method.
 <<Find the available reasoning rules>>=
-def possibleReasoningRules(plugins: Plugins): Future[Seq[RuleApplication]] = {
-  plugins.getProvidersForService("reason").flatMap {
-    s => s.foldLeft(Future{Seq[RuleApplication]()}) {
-      (seq, plugin) =>
-      for {
-        current <- seq;
-        next <- {
-          <<Find all reasoning rules this plug-in can provide for these goals>>
-        }
-      } yield (current ++ next)
-    }
-  }
+def possibleReasoningRules(plugins: Plugins): Future[Seq[RuleApplication]] = possibleRules(
+  plugins,
+  "reason",
+  (jsResponse: JsValue) => jsResponse("reasoning").as[Seq[(LanguageID, String, String, String)]]
+) { (reasoner: (LanguageID, String, String, String), goal: Goal, pluginID: PluginID) =>
+  <<Is the current reasoner applicable?>>
 }
 @
 
-The tail of a proof can have multiple goals,
-so we have to consider all at once.
-<<Find all reasoning rules this plug-in can provide for these goals>>=
-val reasoningsFuture: Future[Seq[(LanguageID, String, String, String)]] =
-  plugin.query("reason", "").map {
-    _("reasoning").as[Seq[(LanguageID, String, String, String)]]
-  }
-reasoningsFuture.map { s => s.flatMap {
-  reasoner => {
-    tail match {
-      case Some(tail) => tail.goals.flatMap { goal =>
-        <<Is the current reasoner applicable?>>
-      }
-      case None => Nil
-    }
-  }
-}}
-@
-@ There are many striking similarities to how
-the translation rule functioned.
-Now, these are about to change.
 
 For a given [[reasoner]]---%
 that is a 4-tuple of language, automation, identifier, and description;
@@ -1590,15 +1578,18 @@ Instead, we focus on whether it \emph{could} work,
 and if so we produce the [[RuleApplication]].
 The definition we take for ``could work'' is simple:
 is it in the right language for some formula?
+We get all the formulae in the reasoner language first,
+the construct the tree of formulae,
+before constructing the rule applications from this information.
 <<Is the current reasoner applicable?>>=
 <<Grab all the formulae in the right language>>
 <<Construct the forest of related formulae>>
 forest.map { formulae =>
-  val rule = new ReasoningRule(reasoner._1, plugin.id, reasoner._3)
+  val rule = new ReasoningRule(reasoner._1, pluginID, reasoner._3)
   val labels = formulae.map{_.label}
   val automated = reasoner._2 == "automated"
   new RuleApplication(rule, goal, labels.toSet, automated, None)
-}
+} filter { rule => rule.components.nonEmpty }
 @
 
 Collecting all the formulae with the right language is a simple filter,
@@ -1626,14 +1617,14 @@ but instead just enough to classify how the plug-in should behave.
 \subsection{Finding extraction rules}
 <<Find the available extraction rules>>=
 def possibleExtractionRules(plugins: Plugins): Future[Seq[RuleApplication]] = {
-  return Future{Nil}
+  Future{Nil}
 }
 @
 
 \subsection{Finding substitution rules}
 <<Find the available substitution rules>>=
 def possibleSubstitutionRules(plugins: Plugins): Future[Seq[RuleApplication]] = {
-  return Future{Nil}
+  Future{Nil}
 }
 @
 
@@ -1683,7 +1674,7 @@ class PluginsController @Inject()(cc: ControllerComponents, plugins: Plugins)
 }
 @
 <<Makefile build entry>>=
-notangle -Rcontrollers/PluginsController.scala $< > main/scala/controllers/PluginsController.scala
+notangle -Rcontrollers/PluginsController.scala $< > main/scala/remix/controllers/PluginsController.scala
 @
 
 One fundamental job is to list which plug-ins are available.
@@ -1811,11 +1802,11 @@ package remix.controllers
 <<Controller imports>>
 
 @Singleton
-class ProofController @Inject()(cc: ControllerComponents, rmdb: ReMixDatabase, pluginsInjection: Plugins)
+class ProofController @Inject()(cc: ControllerComponents, implicit val rmdb: ReMixDatabase, pluginsInjection: Plugins)
     extends AbstractController(cc)
-    with ProofActions
+    with ProofAction
 {
-  implicit val plugins = pluginsInjection // Make suitable for implicit
+  implicit val plugins: Plugins = pluginsInjection // Make suitable for implicit
 
   <<List all proofs>>
   <<Create a proof>>
@@ -1827,7 +1818,7 @@ class ProofController @Inject()(cc: ControllerComponents, rmdb: ReMixDatabase, p
 }
 @
 <<Makefile build entry>>=
-notangle -Rcontrollers/ProofController.scala $< > main/scala/controllers/ProofController.scala
+notangle -Rcontrollers/ProofController.scala $< > main/scala/remix/controllers/ProofController.scala
 @
 
 Let us start with something simple: listing all proof documents.
@@ -1888,15 +1879,13 @@ This is a simpler operation, as it is mostly just calling the predefined databas
 def delete(proofID: Int) =
 Action { implicit request: Request[AnyContent] =>
   val succeeded = rmdb.deleteProof(proofID)
-  succeeded match {
-    case true => Ok(Json.obj(
-      <<success>>
-    ))
-    case false => BadRequest(Json.obj(
-      <<failure>>,
-      "reason" -> "Proof could not be deleted from the database."
-    ))
-  }
+  if (succeeded) Ok(Json.obj(
+    <<success>>
+  ))
+  else BadRequest(Json.obj(
+    <<failure>>,
+    "reason" -> "Proof could not be deleted from the database."
+  ))
 }
 @
 @ Nothing too complicated.
@@ -1911,7 +1900,7 @@ obtaining the proof for us
 (see Appendix~\ref{sec:proofaction}).
 <<Get the state of a proof>>=
 def read(proofID: Int) =
-withProof(rmdb, proofID, save=false) {
+withProof(proofID, save=false) {
     (proof, _) =>
 Action.async {
     implicit request: Request[AnyContent] =>
@@ -1953,7 +1942,7 @@ the plug-in who provides that rule
 will present the user with a dialog box to enter the required information.
 <<Extend the proof by one step>>=
 def extend(proofID: Int) =
-withProof(rmdb, proofID) {
+withProof(proofID) {
     (proof, save) =>
 Action.async {
     implicit request: Request[AnyContent] =>
@@ -1961,7 +1950,7 @@ Action.async {
   val ruleApplication = request.body.asJson.get.as[Option[RuleApplication]].get
   if (!ruleApplication.automated) {
     <<Query user about extra information for non-automated rules>>
-    // The client must start the request again, with the full information,
+    // The client must now start the request again, with the full information,
     // and this time create an automated rule.
   }
   else {
@@ -1976,13 +1965,12 @@ POST /proofs/:proofID/apply remix.controllers.ProofController.extend(proofID: In
 It is read directly and turned into a [[Rule]] instance.
 
 As a quick aside:
-It would be useful to let the user know what rules are available,
-however.
+it would be useful to let the user know what rules are available.
 To this end, we also provide a [[GET]]-flavoured [[extend]] endpoint,
 which lists the available rules the user could apply.
 <<Present ways to extend the given proof>>=
 def extensionOptions(proofID: Int) =
-withProof(rmdb, proofID, save=false) {
+withProof(proofID, save=false) {
     (proof, _) =>
 Action.async {
     implicit request: Request[AnyContent] =>
@@ -2044,7 +2032,7 @@ This should happen only at the tail, but we do allow it at any point for conveni
 It is only recommended to work at the end of a proof.
 <<Remove a step from the proof>>=
 def pop(proofID: Int, index: Int) =
-withProof(rmdb, proofID) {
+withProof(proofID) {
     (proof, save) =>
 Action.async {
     implicit request: Request[AnyContent] =>
@@ -2104,9 +2092,9 @@ clean:
 .PHONY: directories
 directories:
 	mkdir -p main/resources
-	mkdir -p main/scala/controllers
-	mkdir -p main/scala/models
-	mkdir -p main/scala/clients
+	mkdir -p main/scala/remix/controllers
+	mkdir -p main/scala/remix/models
+	mkdir -p main/scala/remix/clients
 
 pdf: ReMix.scala-nw
 	noweave -delay $< > ReMix.tex
@@ -2208,29 +2196,27 @@ package remix.controllers
 
 <<Controller imports>>
 
-trait ProofActions extends Results
+trait ProofAction extends Results
 {
   def withProof(
-    rmdb: ReMixDatabase,
     proofID: Int,
     save: Boolean = true
-  )(block:(Proof, (Proof, Future[Result]) => Future[Result])=> Action[AnyContent]) = {
+  )(
+    block:(Proof, (Proof, Future[Result]) => Future[Result]) => Action[AnyContent]
+  )(implicit rmdb: ReMixDatabase) = {
     rmdb.readProofJSON(proofID) match {
-      case Some(proofJson) => {
+      case Some(proofJson) =>
         val proof = proofJson.as[Proof]
         def saver(proof: Proof, futRes: Future[Result]) = {
           val proofJSON = Json.toJson(proof)
           val saved = rmdb.updateProof(proofID, proofJSON)
-          saved match {
-            case true => futRes
-            case false => Future { BadRequest(Json.obj(
+          if (saved) futRes
+          else Future { BadRequest(Json.obj(
                 <<failure>>,
                 "reason" -> s"Proof '$proofID' could not be saved back to database."
-              ))}
-          }
+          ))}
         }
         block(proof, saver)
-      }
       case None => Action { BadRequest(Json.obj(
         <<failure>>,
         "reason" -> s"Proof with ID '$proofID' not found in database."
@@ -2241,7 +2227,7 @@ trait ProofActions extends Results
 
 @
 <<Makefile build entry>>=
-notangle -Rcontrollers/ProofAction.scala $< > main/scala/controllers/ProofAction.scala
+notangle -Rcontrollers/ProofAction.scala $< > main/scala/remix/controllers/ProofAction.scala
 @
 
 
@@ -2251,6 +2237,7 @@ notangle -Rcontrollers/ProofAction.scala $< > main/scala/controllers/ProofAction
 package remix
 
 <<Model imports>>
+import scala.language.implicitConversions
 
 package object types {
 
@@ -2291,13 +2278,13 @@ package object types {
 
   implicit def optionFormat[T: Format]: Format[Option[T]] = new Format[Option[T]] {
     def reads(json: JsValue): JsResult[Option[T]] = {
-      return JsSuccess(
+      JsSuccess(
         if (json == JsNull) None
         else Some(json.as[T])
       )
     }
     def writes(optVal: Option[T]): JsValue = {
-      return optVal match {
+      optVal match {
         case Some(v) => Json.toJson(v)
         case None => JsNull
       }
@@ -2306,7 +2293,7 @@ package object types {
 }
 @
 <<Makefile build entry>>=
-notangle -Rmodels/Types.scala $< > main/scala/models/Types.scala
+notangle -Rmodels/Types.scala $< > main/scala/remix/models/Types.scala
 @
 
 \section{Errors}
@@ -2330,7 +2317,7 @@ class PluginError(message: String) extends Exception(message) {
 }
 @
 <<Makefile build entry>>=
-notangle -Rmodels/Errors.scala $< > main/scala/models/Errors.scala
+notangle -Rmodels/Errors.scala $< > main/scala/remix/models/Errors.scala
 @
 
 \end{document}
