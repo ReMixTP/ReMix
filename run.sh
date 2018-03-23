@@ -7,7 +7,8 @@ for dir in $(ls plugins); do
     # We assume each plug-in has a Makefile we can use to run it.
     # Because they may not as daemons, we push them to the background.
     echo "plugins/$dir"
-    cd "plugins/$dir" && make run &>/dev/null &
+    cd "plugins/$dir" && make run 
+    cd ../..
     sleep 2  # Give them a second to get going
 done
 

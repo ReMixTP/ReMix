@@ -270,7 +270,12 @@ Regardless, both will become [[None]] after the tail is removed.
 if (tail == head) {
   tail = None
   head = None
-} else {
+}
+@
+@ When the head and tail are different,
+we match on the tail and unlink it.
+<<Remove the tail>>=
+else {
   tail = tail match {
     case Some(old_t) =>
       <<Unlink old tail and form new tail>>
@@ -278,7 +283,7 @@ if (tail == head) {
   }
 }
 @
-@ When they are not the same,
+@ To perform the unlinking,
 we follow the [[prev]] pointer back one step,
 and unlink all outgoing pointers from the old tail.
 The new tail still maintains a pointer to this old tail,
@@ -1506,7 +1511,7 @@ A translation rules is relatively simple.
 It maps a formula from the source language to the target language,
 so long as a plug-in exists to perform this translation.
 Using the [[possibleRules]] method,
-we supply simply the ``key'' we are working with, in this case [["translate"]],
+we supply the ``key'' we are working with, in this case [["translate"]],
 the parser to the intermediate tuple-representation,
 and the function to transform the intermediate representation, a goal, and a plug-in identifier
 into a sequence of [[RuleApplication]]s.
