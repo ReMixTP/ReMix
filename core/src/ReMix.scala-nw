@@ -227,7 +227,7 @@ This is an [[implicit]] parameter,
 so it doesn't pollute the calling code.
 <<Extend the proof by a single step>>=
 def extend(ruleApp: RuleApplication)(implicit plugins: Plugins) {
-  val newGoals = Await.result(ruleApp.apply, 10.seconds)
+  val newGoals = Await.result(ruleApp.apply, 20.seconds)
   // MUST do work before continuing
   // Note that the above may have thrown a PluginError.
   // We fail to catch it so it will bubble through.
@@ -804,7 +804,7 @@ Future[Seq[Goal]] = {
     val formula = formulaOpt.get
     val newFormulaFuture = plugins(provider).flatMap { _.query(
       "translate",
-      s"translate?from=$fromLanguage&to=$toLanguage",
+      s"translate?from=${fromLanguage.value}&to=${toLanguage.value}",
       Json.obj(
         "formula" -> Json.toJson(formula),
         "extraInfo" -> (extraInfo match {
@@ -812,7 +812,14 @@ Future[Seq[Goal]] = {
           case None => JsNull
         })
       )
-    )}.map { json => json.as[Formula] }
+    )}.map { json => {
+      if (json("result").as[String] == "failure") {
+        val message = json("reason").as[String]
+        throw new PluginError(message)
+      } else {
+        json("formula").as[Formula]
+      }
+    }}
     newFormulaFuture.map { formula => {
       val newFormulae = goal.formulae.map { oldFormula =>
         if (oldFormula.label == formula.label) formula
@@ -847,7 +854,7 @@ object TranslationRule
 
     def writes(transRule: TranslationRule): JsValue = {
       Json.obj(
-        "fromLanuage" -> Json.toJson(transRule.fromLanguage),
+        "fromLanguage" -> Json.toJson(transRule.fromLanguage),
         "toLanguage" -> Json.toJson(transRule.toLanguage),
         "provider" -> Json.toJson(transRule.provider)
       )
@@ -1115,16 +1122,23 @@ notangle -Rclients/PluginClient.scala $< > main/scala/remix/clients/PluginClient
 First, a [[GET]] request.
 <<Send a GET request>>=
 def GET(url: String): Future[JsValue] = {
-  val response: Future[WSResponse] = ws
+  Try(
+     ws
     .url(url)
     .withHttpHeaders("Accept" -> "application/json")
     .withHttpHeaders("Cache-Control" -> "no-cache")
     .withRequestTimeout(60.seconds)
     .get()
-  response.map {
-    r => {r.json}
-  } .recover {
-    case t: java.net.ConnectException => JsArray()
+    .map {
+      r => {r.json}
+    }.recover {
+      case t: java.net.ConnectException => JsArray()
+    }
+  ).getOrElse {
+    Future.successful( Json.obj(
+      <<failure>>,
+      "reason" -> s"Unable to send query with URL: $url"
+    ))
   }
 }
 @
@@ -1484,6 +1498,8 @@ def possibleRules[A](
         next <- {
           plugin.query(service, "").map(parser).map{ rules =>
             <<Build the [[RuleApplication]]s and keep those appropriate>>
+          }.recover {
+            case t => Seq()
           }
         }
       } yield current ++ next
@@ -1953,7 +1969,7 @@ Action.async {
     implicit request: Request[AnyContent] =>
 
   val ruleApplication = request.body.asJson.get.as[Option[RuleApplication]].get
-  if (!ruleApplication.automated) {
+  if (!ruleApplication.automated && ruleApplication.extraInfo.isEmpty) {
     <<Query user about extra information for non-automated rules>>
     // The client must now start the request again, with the full information,
     // and this time create an automated rule.
@@ -2026,6 +2042,10 @@ try {
   case e: PluginError => Future{ Ok(Json.obj(
     <<failure>>,
     "reason" -> e.getMessage
+  ))}
+  case e: TimeoutException => Future{ Ok(Json.obj(
+    <<failure>>,
+    "reason" -> "Failed to extend proof in 20 seconds."
   ))}
 }
 @
@@ -2151,6 +2171,7 @@ import remix.types._
 import javax.inject.Inject
 
 import scala.io._
+import scala.util.Try
 import scala.concurrent.Future
 import scala.concurrent.duration._
 
@@ -2182,6 +2203,8 @@ import play.api.libs.Files._
 
 import scala.concurrent.Future
 import scala.concurrent.ExecutionContext.Implicits.global
+
+import java.util.concurrent.TimeoutException
 
 import remix.models._
 import remix.types._
@@ -2238,7 +2261,7 @@ notangle -Rcontrollers/ProofAction.scala $< > main/scala/remix/controllers/Proof
 
 
 \section{Types}
-<<models/Types.scala>>=
+<<models/types.scala>>=
 package remix
 
 <<Model imports>>
@@ -2298,7 +2321,7 @@ package object types {
 }
 @
 <<Makefile build entry>>=
-notangle -Rmodels/Types.scala $< > main/scala/remix/models/Types.scala
+notangle -Rmodels/types.scala $< > main/scala/remix/models/types.scala
 @
 
 \section{Errors}
