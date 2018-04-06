@@ -1,6 +1,6 @@
 all: docker
 
-docker: target/universal/remix-core-0.1.0.zip Dockerfile
+docker: target/universal/remix-core-0.1.0.zip Dockerfile remix.cfg
 	docker build -t "remix/core" .
 
 target/universal/remix-core-0.1.0.zip: source $(shell find project -type f) build.sbt
